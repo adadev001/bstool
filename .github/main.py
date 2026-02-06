@@ -1,0 +1,1 @@
+print("GitHub Actions test: main.py found")
