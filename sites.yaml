@@ -1,0 +1,7 @@
+sites:
+  - name: thehackernews
+    display_name: The Hacker News
+    type: rss
+    url: https://feeds.feedburner.com/TheHackersNews
+    language: en
+    enabled: true
