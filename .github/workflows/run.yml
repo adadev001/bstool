@@ -32,6 +32,16 @@ jobs:
       - name: Run bot
         run: python main.py
 
+      - name: Debug processed file
+        run: |
+          echo "PWD:"
+          pwd
+          echo "Files:"
+          ls -l
+          echo "processed_urls.json:"
+          cat processed_urls.json || echo "processed_urls.json not found"
+
+
       - name: Upload processed URLs
         uses: actions/upload-artifact@v4
         with:
