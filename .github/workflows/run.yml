@@ -2,25 +2,53 @@ name: News to Bluesky Bot
 
 on:
   workflow_dispatch:
+  schedule:
+    # 1日2回（UTC基準）
+    - cron: "0 0,12 * * *"
 
 jobs:
-  run:
+  run-bot:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # ----------------------------------------
+      # リポジトリをチェックアウト
+      # ----------------------------------------
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # ----------------------------------------
+      # Python セットアップ
+      # ----------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
+      # ----------------------------------------
+      # 依存関係インストール
+      # ----------------------------------------
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install feedparser pyyaml
 
-
-      - name: Run script
+      # ----------------------------------------
+      # Bot 実行
+      # ----------------------------------------
+      - name: Run bot
         run: python main.py
+
+      # ----------------------------------------
+      # processed_urls.json を commit & push
+      # ----------------------------------------
+      - name: Commit processed URLs
+        run: |
+          if [ -f processed_urls.json ]; then
+            git status
+            git add processed_urls.json
+            git commit -m "Update processed URLs" || echo "No changes to commit"
+            git push
+          else
+            echo "processed_urls.json not found"
+          fi
