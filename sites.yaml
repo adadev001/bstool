@@ -2,13 +2,9 @@
 # 全体設定
 # ============================================
 settings:
-  # ログレベル
-  # INFO  : 通常運用向け（おすすめ）
-  # DEBUG : 詳細ログ（トラブル時）
   log_level: INFO
 
-  # 初回実行時に既存記事を通知せず、
-  # 処理済みとして保存するかどうか
+  # 初回実行時は既存記事を通知せず
   skip_existing_on_first_run: true
 
 
@@ -17,17 +13,17 @@ settings:
 # ============================================
 sites:
   # ------------------------------------------
-  # The Hacker News（英語）
+  # The Hacker News
   # ------------------------------------------
-  - name: thehackernews          # 内部ID（JSONのキーになる）
+  - name: thehackernews
     display_name: The Hacker News
-    type: rss                   # 取得方法（rss / api / scrape）
+    type: rss                  # 処理方式
     url: https://feeds.feedburner.com/TheHackersNews
-    enabled: true               # false にすると一時的に無効化
-    max_items: 200              # 保存するURLの最大件数
+    enabled: true
+    max_items: 200
 
   # ------------------------------------------
-  # Security NEXT（日本語）
+  # Security NEXT
   # ------------------------------------------
   - name: securitynext
     display_name: Security NEXT
