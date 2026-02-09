@@ -24,10 +24,11 @@ jobs:
 
       # 前回実行時の state を取得（初回は無くてもOK）
       - name: Download processed URLs
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: processed-urls
-        continue-on-error: true
+          path: .
 
       - name: Run bot
         run: python main.py
