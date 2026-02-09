@@ -1,179 +1,109 @@
-import feedparser
-import yaml
-import json
 import os
-import logging
+import json
+import yaml
+import feedparser
 
+# 処理済みURLを保存するファイル
 PROCESSED_FILE = "processed_urls.json"
+SITES_FILE = "sites.yaml"
 
 
-# -------------------------------------------------
-# ログ設定
-# -------------------------------------------------
-def setup_logger(level: str):
-    """
-    ログレベルを設定する。
-    INFO : 通常運用向け
-    DEBUG: トラブルシュート向け
-    """
-    numeric_level = getattr(logging, level.upper(), logging.INFO)
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s [%(levelname)s] %(message)s"
-    )
-
-
-# -------------------------------------------------
-# sites.yaml 読み込み
-# -------------------------------------------------
 def load_sites():
     """
-    サイト定義ファイルを読み込む
+    sites.yaml を読み込む
     """
-    with open("sites.yaml", "r", encoding="utf-8") as f:
+    with open(SITES_FILE, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
-# -------------------------------------------------
-# processed_urls.json 読み込み
-# -------------------------------------------------
 def load_processed_urls():
     """
-    処理済みURLの状態ファイルを読み込む。
-    ファイルが無い、または空の場合は空dictを返す。
+    processed_urls.json を読み込む
+    - ファイルが無い or 空の場合は空のdictを返す
     """
     if not os.path.exists(PROCESSED_FILE):
         return {}
 
-    if os.path.getsize(PROCESSED_FILE) == 0:
+    try:
+        with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except json.JSONDecodeError:
+        # 中身が壊れている／空の場合の保険
         return {}
 
-    with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
 
-
-# -------------------------------------------------
-# site.yaml と JSON の構造同期
-# -------------------------------------------------
-def sync_processed_structure(processed, sites):
+def save_processed_urls(data):
     """
-    site.yaml を正として processed_urls.json を補完する。
-    - サイト追加時は自動初期化
-    - 既存JSONとの後方互換を保つ
+    処理済みURL情報を JSON に保存する
+    Artifact方式では「このファイルを書き出す」ことが最重要
     """
-    for site in sites:
-        name = site["name"]
-
-        if name not in processed:
-            processed[name] = {
-                "initialized": False,
-                "urls": []
-            }
-        else:
-            processed[name].setdefault("initialized", False)
-            processed[name].setdefault("urls", [])
-
-
-# -------------------------------------------------
-# processed_urls.json 保存
-# -------------------------------------------------
-def save_processed_urls(processed, sites):
-    """
-    処理済みURLを保存する。
-    max_items が指定されている場合は古いURLを削除する。
-    """
-    for site in sites:
-        name = site["name"]
-        max_items = site.get("max_items")
-
-        if max_items and name in processed:
-            processed[name]["urls"] = processed[name]["urls"][-max_items:]
-
     with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        json.dump(processed, f, indent=2, ensure_ascii=False)
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# -------------------------------------------------
-# RSS処理
-# -------------------------------------------------
-def process_rss(site, processed, skip_existing_on_first_run):
+def process_rss(site, processed_data):
     """
-    RSSを取得し、新着記事のみ返す。
-    type が未指定の場合のデフォルト処理。
+    RSSサイトを処理する（TypeA）
     """
-    feed = feedparser.parse(site["url"])
     site_name = site["name"]
-    site_data = processed[site_name]
+    rss_url = site["rss"]
 
-    # 初回実行時は既存記事を保存のみして終了
-    if not site_data["initialized"] and skip_existing_on_first_run:
-        logging.info(f"[{site_name}] 初回実行：既存記事をスキップ")
+    # サイト単位の初期データを自動生成
+    if site_name not in processed_data:
+        processed_data[site_name] = {
+            "initialized": False,
+            "urls": []
+        }
+
+    site_data = processed_data[site_name]
+    processed_urls = set(site_data["urls"])
+
+    feed = feedparser.parse(rss_url)
+
+    new_urls = []
+
+    # 初回実行時は既存記事をすべてスキップ
+    if not site_data["initialized"]:
+        print(f"[{site_name}] 初回実行：既存記事をスキップ")
+
         for entry in feed.entries:
-            if hasattr(entry, "link"):
-                site_data["urls"].append(entry.link)
+            if "link" in entry:
+                processed_urls.add(entry.link)
 
         site_data["initialized"] = True
-        return []
 
-    new_entries = []
+    else:
+        # 2回目以降：新着記事のみ処理
+        for entry in feed.entries:
+            if "link" not in entry:
+                continue
 
-    for entry in feed.entries:
-        if not hasattr(entry, "link"):
-            continue
+            if entry.link in processed_urls:
+                continue
 
-        if entry.link not in site_data["urls"]:
-            new_entries.append(entry)
+            print(f"[{site_name}] 新着: {entry.title}")
+            new_urls.append(entry.link)
+            processed_urls.add(entry.link)
 
-    return new_entries
+    # 更新結果を保存用データに反映
+    site_data["urls"] = list(processed_urls)
+
+    return new_urls
 
 
-# -------------------------------------------------
-# メイン処理
-# -------------------------------------------------
 def main():
-    config = load_sites()
+    sites = load_sites()
+    processed_data = load_processed_urls()
 
-    settings = config.get("settings", {})
-    sites = config["sites"]
-
-    setup_logger(settings.get("log_level", "INFO"))
-
-    processed = load_processed_urls()
-
-    # site.yaml を基準に JSON を自動補完
-    sync_processed_structure(processed, sites)
-
-    skip_existing = settings.get("skip_existing_on_first_run", False)
-
-    for site in sites:
-        if not site.get("enabled", True):
+    for site in sites["sites"]:
+        if site.get("type") != "rss":
             continue
 
-        # type 未指定時は rss とみなす（TypeA）
-        site_type = site.get("type", "rss")
+        process_rss(site, processed_data)
 
-        if site_type == "rss":
-            new_entries = process_rss(site, processed, skip_existing)
-
-            for entry in new_entries:
-                logging.info(f"[NEW] {site['display_name']} - {entry.title}")
-                logging.info(f"      {entry.link}")
-
-                # TODO:
-                # 1. 言語判定
-                # 2. Gemini 翻訳
-                # 3. Gemini 要約
-                # 4. Bluesky 投稿
-                # 投稿成功後にのみURL保存する想定
-
-                processed[site["name"]]["urls"].append(entry.link)
-
-            processed[site["name"]]["initialized"] = True
-
-        else:
-            logging.warning(f"未対応の type: {site_type}")
-
-    save_processed_urls(processed, sites)
+    # ★ 最重要ポイント ★
+    # 実行結果を必ず JSON に保存する
+    save_processed_urls(processed_data)
 
 
 if __name__ == "__main__":
