@@ -3,7 +3,7 @@ name: News to Bluesky Bot
 on:
   workflow_dispatch: {}
   schedule:
-    - cron: '0 0,12 * * *'   # 1日2回（JSTでは+9時間）
+    - cron: '0 0,12 * * *'
 
 jobs:
   run-bot:
@@ -22,15 +22,16 @@ jobs:
         run: |
           pip install feedparser pyyaml
 
-      # ---- state をダウンロード（初回は無くてもOK）----
+      # ---- 前回 run の state を取得（無ければ無視）----
       - name: Download processed URLs
-        continue-on-error: true
-        uses: actions/download-artifact@v4
+        uses: dawidd6/action-download-artifact@v3
         with:
+          workflow: run.yml
           name: processed-urls
           path: .
+          if_no_artifact_found: ignore
 
-      # ---- 念のため state ファイルを必ず作る ----
+      # ---- 念のため state ファイルを保証 ----
       - name: Ensure state file exists
         run: |
           if [ ! -f processed_urls.json ]; then
@@ -41,15 +42,7 @@ jobs:
       - name: Run bot
         run: python main.py
 
-      # ---- デバッグ（最初の1〜2回だけ入れてOK）----
-      # - name: Debug processed file
-      #   run: |
-      #     echo "---- ls ----"
-      #     ls -l
-      #     echo "---- processed_urls.json ----"
-      #     cat processed_urls.json
-
-      # ---- state をアップロード ----
+      # ---- state を保存 ----
       - name: Upload processed URLs
         uses: actions/upload-artifact@v4
         with:
