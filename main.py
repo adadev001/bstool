@@ -60,22 +60,25 @@ def process_rss(site, processed, skip_existing):
         }
 
     site_data = processed[name]
-    known_urls = set(site_data["urls"])
+    known_urls = set(site_data.get("urls", []))
 
     feed = feedparser.parse(feed_url)
 
     # -----------------------------
     # 初回実行
     # -----------------------------
-    if not site_data["initialized"]:
+    if not site_data.get("initialized", False):
         if skip_existing:
             print(f"[{name}] 初回実行：既存記事をスキップ")
             for entry in feed.entries:
                 if "link" in entry:
                     known_urls.add(entry.link)
 
+        # ★ ここで「初回完了」を確定させる
         site_data["initialized"] = True
         site_data["urls"] = list(known_urls)[:max_items]
+
+        print(f"[{name}] 初期化完了（記録URL数: {len(site_data['urls'])}）")
         return
 
     # -----------------------------
@@ -97,6 +100,7 @@ def process_rss(site, processed, skip_existing):
         print(f"[{name}] 新着なし")
 
     site_data["urls"] = list(known_urls)[:max_items]
+
 
 
 # ---------------------------------------------
