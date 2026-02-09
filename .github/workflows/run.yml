@@ -1,9 +1,9 @@
 name: News to Bluesky Bot
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
   schedule:
-    - cron: "0 0,12 * * *"   # 1日2回（JSTでは+9時間）
+    - cron: '0 0,12 * * *'
 
 jobs:
   run-bot:
@@ -16,13 +16,12 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           pip install feedparser pyyaml
 
-      # 前回実行時の state を取得（初回は無くてもOK）
       - name: Download processed URLs
         continue-on-error: true
         uses: actions/download-artifact@v4
@@ -30,12 +29,9 @@ jobs:
           name: processed-urls
           path: .
 
-   - run: ls -l
-
       - name: Run bot
         run: python main.py
 
-      # 今回の実行結果を保存
       - name: Upload processed URLs
         uses: actions/upload-artifact@v4
         with:
