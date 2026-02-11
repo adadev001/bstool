@@ -13,7 +13,7 @@ SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 
 # 最初は必ず True にする（事故防止）
-DRY_RUN = True
+DRY_RUN = False
 
 # Blueskyクライアント初期化
 bluesky = BlueskyClient(dry_run=DRY_RUN)
@@ -128,12 +128,6 @@ def main():
 
     # state保存
     save_processed(processed_data)
-
-    print("=== Bluesky 接続テスト ===")
-
-    bluesky.post("Bot接続テスト\nhttps://example.com")
-
-    print("=== 投稿テスト完了 ===")
 
     print("=== main.py end ===")
 
