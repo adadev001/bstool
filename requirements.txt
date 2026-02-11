@@ -2,3 +2,4 @@ feedparser
 PyYAML
 requests
 beautifulsoup4
+atproto
