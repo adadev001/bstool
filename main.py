@@ -1,206 +1,167 @@
 import os
 import json
-import feedparser
-import yaml
 import requests
+import feedparser
 from bs4 import BeautifulSoup
 
-from bluesky_client import BlueskyClient
+# ========= 設定 =========
+DRY_RUN = True  # 本番時は False
 
-# ==============================
-# 設定
-# ==============================
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-SITES_FILE = "sites.yaml"
-STATE_FILE = "processed_urls.json"
+SITES = {
+    "thehackernews": {
+        "type": "rss",
+        "url": "https://feeds.feedburner.com/TheHackersNews"
+    },
+    "securitynext": {
+        "type": "rss",
+        "url": "https://www.security-next.com/feed"
+    }
+}
 
-DRY_RUN = True  # 本番は False
+STATE_FILE = "processed.json"
 
-bluesky = BlueskyClient(dry_run=DRY_RUN)
 
-# ==============================
-# state 読み込み
-# ==============================
-
-def load_processed():
+# ========= 状態管理 =========
+def load_state():
     if not os.path.exists(STATE_FILE):
         return {}
     with open(STATE_FILE, "r") as f:
         return json.load(f)
 
-def save_processed(data):
+
+def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(state, f, indent=2)
 
-# ==============================
-# 本文取得
-# ==============================
 
-def extract_article_text(url):
+# ========= 本文取得 =========
+def fetch_article_text(url):
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
+        res = requests.get(url, timeout=10)
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        paragraphs = soup.find_all("p")
+        text = " ".join(p.get_text() for p in paragraphs)
+
+        # 無料最適化（改行除去 + 800文字制限）
+        text = text.replace("\n", " ").strip()[:800]
+
+        return text
     except Exception as e:
-        print(f"本文取得失敗: {url} ({e})")
+        print("本文取得エラー:", e)
         return ""
 
-    soup = BeautifulSoup(response.text, "html.parser")
 
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
+# ========= Gemini 要約 =========
+def summarize_with_gemini(text):
+    endpoint = (
+        f"https://generativelanguage.googleapis.com/v1/"
+        f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
+    )
 
-    paragraphs = soup.find_all("p")
-    text = "\n".join(p.get_text().strip() for p in paragraphs)
+    prompt = f"次を140字以内で日本語要約:\n{text}"
 
-    return text.strip()
+    headers = {"Content-Type": "application/json"}
 
-# ==============================
-# Gemini 要約
-# ==============================
-
-def summarize_with_gemini(text, max_output_chars=140):
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("GEMINI_API_KEY未設定")
-        return None
-
-    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-2.5-flash-lite:generateContent?key={api_key}"
-
-
-    prompt = f"""
-以下の記事を日本語で{max_output_chars}文字以内に要約してください。
-専門用語は可能な限り維持してください。
-簡潔にまとめてください。
-
-{text}
-"""
-
-    payload = {
+    data = {
         "contents": [
             {
-                "parts": [
-                    {"text": prompt}
-                ]
+                "parts": [{"text": prompt}]
             }
         ]
     }
 
     try:
-        response = requests.post(endpoint, json=payload, timeout=30)
+        response = requests.post(endpoint, headers=headers, json=data, timeout=20)
         response.raise_for_status()
         result = response.json()
-        summary = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-        return summary
+
+        summary = result["candidates"][0]["content"]["parts"][0]["text"]
+        return summary.strip()
+
     except Exception as e:
-        print("Gemini要約失敗:", e)
-        return None
+        print("Geminiエラー:", e)
+        return "要約に失敗しました"
 
-# ==============================
-# RSS処理
-# ==============================
 
-def process_rss(site_name, site_config, processed_data):
-    print(f"[{site_name}] 処理開始 (type=rss)")
+# ========= RSS処理 =========
+def process_rss(site_name, site_config, state):
+    print(f"[{site_name}] 処理開始")
 
     feed = feedparser.parse(site_config["url"])
     entries = feed.entries
 
-    site_state = processed_data.get(site_name, {
-        "initialized": False,
-        "urls": []
-    })
+    if site_name not in state:
+        state[site_name] = {"urls": []}
 
-    # 初回
-    if not site_state["initialized"]:
-        print(f"[{site_name}] 初回実行：既存記事をスキップ")
-        site_state["urls"] = [entry.link for entry in entries]
-        site_state["initialized"] = True
-        processed_data[site_name] = site_state
-        print(f"[{site_name}] 初期化完了（記録URL数: {len(site_state['urls'])}）")
-        return
-
-    # 通常
+    site_state = state[site_name]
     new_entries = []
 
     for entry in entries:
         if entry.link not in site_state["urls"]:
             new_entries.append(entry)
 
-    # ★ テスト用：新着が無い場合は先頭記事を1件だけ使う
+    # テストモード（まだ戻さない）
     if not new_entries and entries:
         print(f"[{site_name}] テストモード：先頭記事を強制処理")
         new_entries = [entries[0]]
-
-    # ★ 最大1件に制限
-    if new_entries:
-        new_entries = new_entries[:1]
 
     if not new_entries:
         print(f"[{site_name}] 新着なし")
         return
 
-    new_entries.reverse()
+    # 1件だけ処理
+    entry = new_entries[0]
 
-    for entry in new_entries:
-        print(f"[{site_name}] 新着: {entry.title}")
+    print(f"[{site_name}] 新着: {entry.title}")
 
-        article_text = extract_article_text(entry.link)
-        if not article_text:
-            print("本文取得失敗または空本文")
-            continue
+    article_text = fetch_article_text(entry.link)
 
-        ai_input_text = article_text[:1200]
+    if not article_text:
+        print("本文なし")
+        return
 
-        print("---- 本文先頭1200文字 ----")
-        print(ai_input_text)
-        print("------------------------")
+    print("---- 本文先頭800文字 ----")
+    print(article_text)
+    print("------------------------")
 
-        summary = summarize_with_gemini(ai_input_text)
+    summary = summarize_with_gemini(article_text)
 
-        if summary:
-            max_length = 140 - len(entry.link) - 1
-            if len(summary) > max_length:
-                summary = summary[:max_length - 3] + "..."
-                post_text = f"{summary}\n{entry.link}"
-        else:
-            print("AI失敗のためタイトル投稿へフォールバック")
-            post_text = f"{entry.title}\n{entry.link}"
+    # 140字制御（リンク込み）
+    max_length = 140 - len(entry.link) - 1
 
-        if DRY_RUN:
-            print("[DRY RUN] 投稿内容:")
-            print(post_text)
-        else:
-            bluesky.post(post_text)
+    if len(summary) > max_length:
+        summary = summary[:max_length - 3] + "..."
 
-        site_state["urls"].append(entry.link)
+    post_text = f"{summary}\n{entry.link}"
 
-    processed_data[site_name] = site_state
+    print("[DRY RUN] 投稿内容:")
+    print(post_text)
 
-# ==============================
-# main
-# ==============================
+    # 本番投稿
+    if not DRY_RUN:
+        # ここにBluesky投稿処理を書く
+        pass
 
+    # 処理済み保存
+    site_state["urls"].append(entry.link)
+
+
+# ========= メイン =========
 def main():
     print("=== main.py start ===")
 
-    with open(SITES_FILE, "r") as f:
-        config = yaml.safe_load(f)
+    state = load_state()
 
-    sites = config["sites"]
-    processed_data = load_processed()
+    for site_name, site_config in SITES.items():
+        process_rss(site_name, site_config, state)
 
-    for site_name, site_config in sites.items():
-
-        if not site_config.get("enabled", True):
-            print(f"[{site_name}] 無効化されているためスキップ")
-            continue
-
-        if site_config["type"] == "rss":
-            process_rss(site_name, site_config, processed_data)
-
-    save_processed(processed_data)
+    save_state(state)
 
     print("=== main.py end ===")
+
 
 if __name__ == "__main__":
     main()
