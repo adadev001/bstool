@@ -20,9 +20,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-         pip install feedparser pyyaml atproto
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      # ---- 前回 run の state を取得（無ければ無視）----
+      # ---- 前回 run の state を取得 ----
       - name: Download processed URLs
         uses: dawidd6/action-download-artifact@v3
         with:
@@ -31,18 +32,15 @@ jobs:
           path: .
           if_no_artifact_found: ignore
 
-      # ---- 念のため state ファイルを保証 ----
       - name: Ensure state file exists
         run: |
           if [ ! -f processed_urls.json ]; then
             echo "{}" > processed_urls.json
           fi
 
-      # ---- Bot 実行 ----
       - name: Run bot
         run: python main.py
 
-      # ---- state を保存 ----
       - name: Upload processed URLs
         uses: actions/upload-artifact@v4
         with:
