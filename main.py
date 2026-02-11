@@ -38,14 +38,6 @@ def save_state(state):
 
 # ========= 本文取得 =========
 def fetch_article_text(url, title):
-    """
-    ▼ 最適化ポイント
-    - 改行除去
-    - 連続空白圧縮
-    - タイトルを先頭に追加（要点把握効率UP）
-    - 全体600文字に制限（無料枠節約）
-    """
-
     try:
         res = requests.get(url, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -53,16 +45,14 @@ def fetch_article_text(url, title):
         paragraphs = soup.find_all("p")
         text = " ".join(p.get_text() for p in paragraphs)
 
-        # 改行削除＋空白圧縮
-        text = text.replace("\n", " ").replace("  ", " ").strip()
+        # 完全空白圧縮（最強版）
+        text = " ".join(text.split())
 
         # タイトル追加
         text = f"{title} {text}"
 
         # 600文字制限
-        text = text[:600]
-
-        return text
+        return text[:600]
 
     except Exception as e:
         print("本文取得エラー:", e)
@@ -71,27 +61,19 @@ def fetch_article_text(url, title):
 
 # ========= Gemini 要約 =========
 def summarize_with_gemini(text):
-    """
-    ▼ 最適化ポイント
-    - prompt短文化
-    - 120字以内指定（出力トークン削減）
-    - temperature=0.2（安定＆無駄出力防止）
-    - maxOutputTokens=200（安全上限）
-    """
 
     endpoint = (
         f"https://generativelanguage.googleapis.com/v1/"
         f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     )
 
-    # プロンプト短文化
-    prompt = f"120字以内で日本語要約:\n{text}"
+    prompt = f"日本語で120字以内要約:\n{text}"
 
     data = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 200
+            "maxOutputTokens": 160  # 200→160に削減
         }
     }
 
@@ -102,12 +84,19 @@ def summarize_with_gemini(text):
         response.raise_for_status()
         result = response.json()
 
-        summary = result["candidates"][0]["content"]["parts"][0]["text"]
+        summary = (
+            result.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "")
+        )
+
         return summary.strip()
 
     except Exception as e:
         print("Geminiエラー:", e)
-        return "要約に失敗しました"
+        return "要約失敗"
+
 
 
 # ========= RSS処理 =========
@@ -152,12 +141,17 @@ def process_rss(site_name, site_config, state):
 
     summary = summarize_with_gemini(article_text)
 
-    # ▼ 120字＋リンク込みで安全制御
-    max_length = 120
-    if len(summary) > max_length:
-        summary = summary[:max_length - 3] + "..."
+    # ▼ URL込み120字制御
+    url = entry.link
+    max_total = 120
 
-    post_text = f"{summary}\n{entry.link}"
+    available = max_total - len(url) - 1  # 改行分
+
+    if len(summary) > available:
+        summary = summary[:available - 3] + "..."
+
+    post_text = f"{summary}\n{url}"
+
 
     print("[DRY RUN] 投稿内容:")
     print(post_text)
