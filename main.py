@@ -64,7 +64,8 @@ def summarize_with_gemini(text, max_output_chars=140):
         print("GEMINI_API_KEY未設定")
         return None
 
-    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={api_key}"
+    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key={api_key}"
+
 
     prompt = f"""
 以下の記事を日本語で{max_output_chars}文字以内に要約してください。
