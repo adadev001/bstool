@@ -67,7 +67,7 @@ def summarize_with_gemini(text):
         f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     )
 
-    prompt = f"日本語で120字以内要約:\n{text}"
+    prompt = f"120字以内で要約。\n{text}"
 
     data = {
         "contents": [{"parts": [{"text": prompt}]}],
