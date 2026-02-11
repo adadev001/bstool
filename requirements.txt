@@ -1,9 +1,8 @@
-requests
-beautifulsoup4
-feedparser
 readability-lxml
 langdetect
 google-generativeai
 atproto
 pyyaml
-
+feedparser
+requests
+beautifulsoup4
