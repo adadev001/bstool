@@ -118,14 +118,14 @@ def main():
     # サイトごとに処理
     for site_name, site_config in sites.items():
 
-    # 無効サイトはスキップ
-    if not site_config.get("enabled", True):
-        print(f"[{site_name}] 無効化されているためスキップ")
-        continue
+        # 無効サイトはスキップ
+        if not site_config.get("enabled", True):
+            print(f"[{site_name}] 無効化されているためスキップ")
+            continue
 
-    if site_config["type"] == "rss":
-        process_rss(site_name, site_config, processed_data)
-        
+        if site_config["type"] == "rss":
+            process_rss(site_name, site_config, processed_data)
+
     # state保存
     save_processed(processed_data)
 
