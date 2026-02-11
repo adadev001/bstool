@@ -114,9 +114,15 @@ def process_rss(site_name, site_config, processed_data):
     # --------------------------
     new_entries = []
 
+    #テスト用に変更
+    #for entry in entries:
+    #    if entry.link not in site_state["urls"]:
+    #       new_entries.append(entry)
+    #ここから
     for entry in entries:
-        if entry.link not in site_state["urls"]:
-            new_entries.append(entry)
+    if True:
+        new_entries.append(entry)
+    #ここまで
 
     if not new_entries:
         print(f"[{site_name}] 新着なし")
@@ -137,12 +143,11 @@ def process_rss(site_name, site_config, processed_data):
         # 140文字制限投稿
         post_text = format_post(entry.title, entry.link, max_length=140)
 
-        print("---- 投稿内容 ----")
-        print(post_text)
-        print(f"(文字数: {len(post_text)})")
-        print("------------------")
-
-        bluesky.post(post_text)
+        if DRY_RUN:
+            print("[DRY RUN] 投稿内容:")
+            print(post_text)
+        else:
+            bluesky.post(post_text)
 
         site_state["urls"].append(entry.link)
 
