@@ -120,8 +120,8 @@ def process_rss(site_name, site_config, processed_data):
     #       new_entries.append(entry)
     #ここから
     for entry in entries:
-    if True:
-        new_entries.append(entry)
+        if True:
+            new_entries.append(entry)
     #ここまで
 
     if not new_entries:
