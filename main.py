@@ -125,7 +125,12 @@ def process_rss(site_name, site_config, processed_data):
         if entry.link not in site_state["urls"]:
             new_entries.append(entry)
 
-         # ★ テスト用：最大1記事だけ処理
+    # ★ テスト用：新着が無い場合は先頭記事を1件だけ使う
+    if not new_entries and entries:
+        print(f"[{site_name}] テストモード：先頭記事を強制処理")
+        new_entries = [entries[0]]
+
+    # ★ 最大1件に制限
     if new_entries:
         new_entries = new_entries[:1]
 
