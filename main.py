@@ -1,141 +1,128 @@
 import os
 import json
-import yaml
 import feedparser
+import yaml
 
-# ---------------------------------------------
-# ファイル定義
-# ---------------------------------------------
+from bluesky_client import BlueskyClient
+
+# ==============================
+# 設定
+# ==============================
+
 SITES_FILE = "sites.yaml"
-PROCESSED_FILE = "processed_urls.json"
+STATE_FILE = "processed_urls.json"
+
+# 最初は必ず True にする（事故防止）
+DRY_RUN = True
+
+# Blueskyクライアント初期化
+bluesky = BlueskyClient(dry_run=DRY_RUN)
 
 
-# ---------------------------------------------
-# 設定・状態読み込み
-# ---------------------------------------------
-def load_config():
-    if not os.path.exists(SITES_FILE):
-        raise FileNotFoundError(f"{SITES_FILE} が見つかりません")
-
-    with open(SITES_FILE, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
+# ==============================
+# state 読み込み
+# ==============================
 
 def load_processed():
-    """
-    処理済みURL情報を読み込む
-    初回実行・空ファイル・破損時は空dictを返す
-    """
-    if not os.path.exists(PROCESSED_FILE):
+    if not os.path.exists(STATE_FILE):
         return {}
+    with open(STATE_FILE, "r") as f:
+        return json.load(f)
 
-    try:
-        with open(PROCESSED_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return {}
 
+# ==============================
+# state 保存
+# ==============================
 
 def save_processed(data):
-    """
-    処理結果を保存する
-    """
-    with open(PROCESSED_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with open(STATE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
-# ---------------------------------------------
-# RSS処理（TypeA）
-# ---------------------------------------------
-def process_rss(site, processed, skip_existing):
-    name = site["name"]
-    feed_url = site["url"]
-    max_items = site.get("max_items", 200)
+# ==============================
+# RSS処理
+# ==============================
 
-    # サイト単位の初期化（site.yaml追加時に自動対応）
-    if name not in processed:
-        processed[name] = {
-            "initialized": False,
-            "urls": []
-        }
+def process_rss(site_name, site_config, processed_data):
+    print(f"[{site_name}] 処理開始 (type=rss)")
 
-    site_data = processed[name]
-    known_urls = set(site_data.get("urls", []))
+    feed = feedparser.parse(site_config["url"])
+    entries = feed.entries
 
-    feed = feedparser.parse(feed_url)
+    # サイトごとの記録を取得
+    site_state = processed_data.get(site_name, {
+        "initialized": False,
+        "urls": []
+    })
 
-    # -----------------------------
-    # 初回実行
-    # -----------------------------
-    if not site_data.get("initialized", False):
-        if skip_existing:
-            print(f"[{name}] 初回実行：既存記事をスキップ")
-            for entry in feed.entries:
-                if "link" in entry:
-                    known_urls.add(entry.link)
+    # --------------------------
+    # 初回実行処理
+    # --------------------------
+    if not site_state["initialized"]:
+        print(f"[{site_name}] 初回実行：既存記事をスキップ")
 
-        # ★ ここで「初回完了」を確定させる
-        site_data["initialized"] = True
-        site_data["urls"] = list(known_urls)[:max_items]
+        site_state["urls"] = [entry.link for entry in entries]
+        site_state["initialized"] = True
 
-        print(f"[{name}] 初期化完了（記録URL数: {len(site_data['urls'])}）")
+        processed_data[site_name] = site_state
+        print(f"[{site_name}] 初期化完了（記録URL数: {len(site_state['urls'])}）")
         return
 
-    # -----------------------------
-    # 2回目以降（新着のみ）
-    # -----------------------------
-    new_count = 0
-    for entry in feed.entries:
-        if "link" not in entry:
-            continue
+    # --------------------------
+    # 通常実行（新着判定）
+    # --------------------------
+    new_entries = []
 
-        if entry.link in known_urls:
-            continue
+    for entry in entries:
+        if entry.link not in site_state["urls"]:
+            new_entries.append(entry)
 
-        print(f"[{name}] 新着: {entry.title}")
-        known_urls.add(entry.link)
-        new_count += 1
+    if not new_entries:
+        print(f"[{site_name}] 新着なし")
+        return
 
-    if new_count == 0:
-        print(f"[{name}] 新着なし")
+    # 古い順に投稿したいので reverse
+    new_entries.reverse()
 
-    site_data["urls"] = list(known_urls)[:max_items]
+    for entry in new_entries:
+        print(f"[{site_name}] 新着: {entry.title}")
+
+        # 投稿内容作成
+        post_text = f"{entry.title}\n{entry.link}"
+
+        # Bluesky投稿
+        bluesky.post(post_text)
+
+        # state更新
+        site_state["urls"].append(entry.link)
+
+    processed_data[site_name] = site_state
 
 
+# ==============================
+# main
+# ==============================
 
-# ---------------------------------------------
-# メイン処理
-# ---------------------------------------------
 def main():
     print("=== main.py start ===")
 
-    config = load_config()
+    # 設定読み込み
+    with open(SITES_FILE, "r") as f:
+        config = yaml.safe_load(f)
 
-    settings = config.get("settings", {})
-    sites = config.get("sites", [])
+    sites = config["sites"]
 
-    if not sites:
-        print("⚠ sites.yaml に sites が定義されていません")
-        return
+    # state読み込み
+    processed_data = load_processed()
 
-    skip_existing = settings.get("skip_existing_on_first_run", True)
+    # サイトごとに処理
+    for site_name, site_config in sites.items():
+        if site_config["type"] == "rss":
+            process_rss(site_name, site_config, processed_data)
 
-    processed = load_processed()
+    # state保存
+    save_processed(processed_data)
 
-    for site in sites:
-        if not site.get("enabled", True):
-            continue
-
-        site_type = site.get("type", "rss")
-
-        print(f"[{site['name']}] 処理開始 (type={site_type})")
-
-        if site_type == "rss":
-            process_rss(site, processed, skip_existing)
-        else:
-            print(f"[WARN] 未対応の type: {site_type}")
-
-    save_processed(processed)
     print("=== main.py end ===")
 
 
