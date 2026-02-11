@@ -147,8 +147,14 @@ def process_rss(site_name, site_config, state):
 
     available = max_total - len(url) - 1  # 改行分
 
-    if len(summary) > available:
-        summary = summary[:available - 3] + "..."
+    if available < 10:
+        summary = "詳細はリンク参照"
+    else:
+        if len(summary) > available:
+            summary = summary[:available - 3] + "..."
+
+        if len(summary) > available:
+            summary = summary[:available - 3] + "..."
 
     post_text = f"{summary}\n{url}"
 
