@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install feedparser pyyaml
+         pip install feedparser pyyaml atproto
 
       # ---- 前回 run の state を取得（無ければ無視）----
       - name: Download processed URLs
