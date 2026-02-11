@@ -37,7 +37,15 @@ def save_state(state):
 
 
 # ========= 本文取得 =========
-def fetch_article_text(url):
+def fetch_article_text(url, title):
+    """
+    ▼ 最適化ポイント
+    - 改行除去
+    - 連続空白圧縮
+    - タイトルを先頭に追加（要点把握効率UP）
+    - 全体600文字に制限（無料枠節約）
+    """
+
     try:
         res = requests.get(url, timeout=10)
         soup = BeautifulSoup(res.text, "html.parser")
@@ -45,10 +53,17 @@ def fetch_article_text(url):
         paragraphs = soup.find_all("p")
         text = " ".join(p.get_text() for p in paragraphs)
 
-        # 無料最適化（改行除去 + 800文字制限）
-        text = text.replace("\n", " ").strip()[:800]
+        # 改行削除＋空白圧縮
+        text = text.replace("\n", " ").replace("  ", " ").strip()
+
+        # タイトル追加
+        text = f"{title} {text}"
+
+        # 600文字制限
+        text = text[:600]
 
         return text
+
     except Exception as e:
         print("本文取得エラー:", e)
         return ""
@@ -56,22 +71,31 @@ def fetch_article_text(url):
 
 # ========= Gemini 要約 =========
 def summarize_with_gemini(text):
+    """
+    ▼ 最適化ポイント
+    - prompt短文化
+    - 120字以内指定（出力トークン削減）
+    - temperature=0.2（安定＆無駄出力防止）
+    - maxOutputTokens=200（安全上限）
+    """
+
     endpoint = (
         f"https://generativelanguage.googleapis.com/v1/"
         f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     )
 
-    prompt = f"次を140字以内で日本語要約:\n{text}"
-
-    headers = {"Content-Type": "application/json"}
+    # プロンプト短文化
+    prompt = f"120字以内で日本語要約:\n{text}"
 
     data = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ]
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.2,
+            "maxOutputTokens": 200
+        }
     }
+
+    headers = {"Content-Type": "application/json"}
 
     try:
         response = requests.post(endpoint, headers=headers, json=data, timeout=20)
@@ -103,7 +127,7 @@ def process_rss(site_name, site_config, state):
         if entry.link not in site_state["urls"]:
             new_entries.append(entry)
 
-    # テストモード（まだ戻さない）
+    # テストモード維持
     if not new_entries and entries:
         print(f"[{site_name}] テストモード：先頭記事を強制処理")
         new_entries = [entries[0]]
@@ -112,26 +136,24 @@ def process_rss(site_name, site_config, state):
         print(f"[{site_name}] 新着なし")
         return
 
-    # 1件だけ処理
     entry = new_entries[0]
 
     print(f"[{site_name}] 新着: {entry.title}")
 
-    article_text = fetch_article_text(entry.link)
+    article_text = fetch_article_text(entry.link, entry.title)
 
     if not article_text:
         print("本文なし")
         return
 
-    print("---- 本文先頭800文字 ----")
+    print("---- 本文先頭600文字 ----")
     print(article_text)
     print("------------------------")
 
     summary = summarize_with_gemini(article_text)
 
-    # 140字制御（リンク込み）
-    max_length = 140 - len(entry.link) - 1
-
+    # ▼ 120字＋リンク込みで安全制御
+    max_length = 120
     if len(summary) > max_length:
         summary = summary[:max_length - 3] + "..."
 
@@ -142,7 +164,7 @@ def process_rss(site_name, site_config, state):
 
     # 本番投稿
     if not DRY_RUN:
-        # ここにBluesky投稿処理を書く
+        # Bluesky投稿処理を書く
         pass
 
     # 処理済み保存
