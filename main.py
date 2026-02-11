@@ -14,8 +14,7 @@ from bluesky_client import BlueskyClient
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 
-# テスト時は True、本番は False
-DRY_RUN = True
+DRY_RUN = True  # 本番は False
 
 bluesky = BlueskyClient(dry_run=DRY_RUN)
 
@@ -29,16 +28,12 @@ def load_processed():
     with open(STATE_FILE, "r") as f:
         return json.load(f)
 
-# ==============================
-# state 保存
-# ==============================
-
 def save_processed(data):
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
 # ==============================
-# 本文取得（AI用）
+# 本文取得
 # ==============================
 
 def extract_article_text(url):
@@ -60,21 +55,44 @@ def extract_article_text(url):
     return text.strip()
 
 # ==============================
-# 投稿フォーマット（140文字制限）
+# Gemini 要約
 # ==============================
 
-def format_post(title, url, max_length=140):
-    base_text = f"{title}\n{url}"
+def summarize_with_gemini(text, max_output_chars=140):
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        print("GEMINI_API_KEY未設定")
+        return None
 
-    if len(base_text) <= max_length:
-        return base_text
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
 
-    url_part = f"\n{url}"
-    available_length = max_length - len(url_part) - 3
+    prompt = f"""
+以下の記事を日本語で{max_output_chars}文字以内に要約してください。
+専門用語は可能な限り維持してください。
+簡潔にまとめてください。
 
-    shortened_title = title[:available_length] + "..."
+{text}
+"""
 
-    return f"{shortened_title}{url_part}"
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(endpoint, json=payload, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        summary = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return summary
+    except Exception as e:
+        print("Gemini要約失敗:", e)
+        return None
 
 # ==============================
 # RSS処理
@@ -91,31 +109,21 @@ def process_rss(site_name, site_config, processed_data):
         "urls": []
     })
 
-    # --------------------------
-    # 初回実行
-    # --------------------------
+    # 初回
     if not site_state["initialized"]:
         print(f"[{site_name}] 初回実行：既存記事をスキップ")
-
         site_state["urls"] = [entry.link for entry in entries]
         site_state["initialized"] = True
-
         processed_data[site_name] = site_state
         print(f"[{site_name}] 初期化完了（記録URL数: {len(site_state['urls'])}）")
         return
 
-    # --------------------------
-    # 通常実行
-    # --------------------------
+    # 通常
     new_entries = []
 
     for entry in entries:
-        # 強制テストは以下のif~append(entry)の2行をコメントアウトして
-        new_entries.append(entry)の行のコメントを外す
         if entry.link not in site_state["urls"]:
             new_entries.append(entry)
-
-        #new_entries.append(entry)
 
     if not new_entries:
         print(f"[{site_name}] 新着なし")
@@ -126,22 +134,26 @@ def process_rss(site_name, site_config, processed_data):
     for entry in new_entries:
         print(f"[{site_name}] 新着: {entry.title}")
 
-        # 本文取得（AI材料）
         article_text = extract_article_text(entry.link)
-
         if not article_text:
             print("本文取得失敗または空本文")
             continue
 
-        # 1200文字抽出
         ai_input_text = article_text[:1200]
 
         print("---- 本文先頭1200文字 ----")
         print(ai_input_text)
         print("------------------------")
 
-        # 現在はタイトル投稿（次フェーズでAI要約に置換）
-        post_text = format_post(entry.title, entry.link, max_length=140)
+        summary = summarize_with_gemini(ai_input_text)
+
+        if summary:
+            if len(summary) > 140:
+                summary = summary[:137] + "..."
+            post_text = f"{summary}\n{entry.link}"
+        else:
+            print("AI失敗のためタイトル投稿へフォールバック")
+            post_text = f"{entry.title}\n{entry.link}"
 
         if DRY_RUN:
             print("[DRY RUN] 投稿内容:")
@@ -164,7 +176,6 @@ def main():
         config = yaml.safe_load(f)
 
     sites = config["sites"]
-
     processed_data = load_processed()
 
     for site_name, site_config in sites.items():
