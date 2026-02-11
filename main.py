@@ -14,7 +14,8 @@ from bluesky_client import BlueskyClient
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 
-DRY_RUN = False
+# テスト時は True、本番は False
+DRY_RUN = True
 
 bluesky = BlueskyClient(dry_run=DRY_RUN)
 
@@ -40,7 +41,7 @@ def save_processed(data):
 
 
 # ==============================
-# 本文取得
+# 本文取得（将来AI用）
 # ==============================
 
 def extract_article_text(url):
@@ -60,6 +61,24 @@ def extract_article_text(url):
     text = "\n".join(p.get_text().strip() for p in paragraphs)
 
     return text.strip()
+
+
+# ==============================
+# 投稿フォーマット（140文字制限）
+# ==============================
+
+def format_post(title, url, max_length=140):
+    base_text = f"{title}\n{url}"
+
+    if len(base_text) <= max_length:
+        return base_text
+
+    url_part = f"\n{url}"
+    available_length = max_length - len(url_part) - 3  # "..."分確保
+
+    shortened_title = title[:available_length] + "..."
+
+    return f"{shortened_title}{url_part}"
 
 
 # ==============================
@@ -107,17 +126,23 @@ def process_rss(site_name, site_config, processed_data):
 
     for entry in new_entries:
         print(f"[{site_name}] 新着: {entry.title}")
-        print(f"[{site_name}] 本文取得中: {entry.link}")
 
+        # 本文取得（将来AI用）
         article_text = extract_article_text(entry.link)
 
-        print("---- 本文先頭300文字 ----")
-        print(article_text[:300])
+        print("---- 本文先頭200文字 ----")
+        print(article_text[:200])
         print("------------------------")
 
-        # 🔴 まだ投稿しない（確認フェーズ）
-        # post_text = f"{entry.title}\n{entry.link}"
-        # bluesky.post(post_text)
+        # 140文字制限投稿
+        post_text = format_post(entry.title, entry.link, max_length=140)
+
+        print("---- 投稿内容 ----")
+        print(post_text)
+        print(f"(文字数: {len(post_text)})")
+        print("------------------")
+
+        bluesky.post(post_text)
 
         site_state["urls"].append(entry.link)
 
