@@ -2,6 +2,8 @@ import os
 import json
 import feedparser
 import yaml
+import requests
+from bs4 import BeautifulSoup
 
 from bluesky_client import BlueskyClient
 
@@ -12,10 +14,8 @@ from bluesky_client import BlueskyClient
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 
-# 最初は必ず True にする（事故防止）
 DRY_RUN = False
 
-# Blueskyクライアント初期化
 bluesky = BlueskyClient(dry_run=DRY_RUN)
 
 
@@ -40,6 +40,29 @@ def save_processed(data):
 
 
 # ==============================
+# 本文取得
+# ==============================
+
+def extract_article_text(url):
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+    except Exception as e:
+        print(f"本文取得失敗: {url} ({e})")
+        return ""
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    paragraphs = soup.find_all("p")
+    text = "\n".join(p.get_text().strip() for p in paragraphs)
+
+    return text.strip()
+
+
+# ==============================
 # RSS処理
 # ==============================
 
@@ -49,14 +72,13 @@ def process_rss(site_name, site_config, processed_data):
     feed = feedparser.parse(site_config["url"])
     entries = feed.entries
 
-    # サイトごとの記録を取得
     site_state = processed_data.get(site_name, {
         "initialized": False,
         "urls": []
     })
 
     # --------------------------
-    # 初回実行処理
+    # 初回実行
     # --------------------------
     if not site_state["initialized"]:
         print(f"[{site_name}] 初回実行：既存記事をスキップ")
@@ -69,7 +91,7 @@ def process_rss(site_name, site_config, processed_data):
         return
 
     # --------------------------
-    # 通常実行（新着判定）
+    # 通常実行
     # --------------------------
     new_entries = []
 
@@ -81,19 +103,22 @@ def process_rss(site_name, site_config, processed_data):
         print(f"[{site_name}] 新着なし")
         return
 
-    # 古い順に投稿したいので reverse
     new_entries.reverse()
 
     for entry in new_entries:
         print(f"[{site_name}] 新着: {entry.title}")
+        print(f"[{site_name}] 本文取得中: {entry.link}")
 
-        # 投稿内容作成
-        post_text = f"{entry.title}\n{entry.link}"
+        article_text = extract_article_text(entry.link)
 
-        # Bluesky投稿
-        bluesky.post(post_text)
+        print("---- 本文先頭300文字 ----")
+        print(article_text[:300])
+        print("------------------------")
 
-        # state更新
+        # 🔴 まだ投稿しない（確認フェーズ）
+        # post_text = f"{entry.title}\n{entry.link}"
+        # bluesky.post(post_text)
+
         site_state["urls"].append(entry.link)
 
     processed_data[site_name] = site_state
@@ -106,19 +131,15 @@ def process_rss(site_name, site_config, processed_data):
 def main():
     print("=== main.py start ===")
 
-    # 設定読み込み
     with open(SITES_FILE, "r") as f:
         config = yaml.safe_load(f)
 
     sites = config["sites"]
 
-    # state読み込み
     processed_data = load_processed()
 
-    # サイトごとに処理
     for site_name, site_config in sites.items():
 
-        # 無効サイトはスキップ
         if not site_config.get("enabled", True):
             print(f"[{site_name}] 無効化されているためスキップ")
             continue
@@ -126,7 +147,6 @@ def main():
         if site_config["type"] == "rss":
             process_rss(site_name, site_config, processed_data)
 
-    # state保存
     save_processed(processed_data)
 
     print("=== main.py end ===")
