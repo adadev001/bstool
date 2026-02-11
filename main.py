@@ -153,11 +153,7 @@ def process_rss(site_name, site_config, state):
         if len(summary) > available:
             summary = summary[:available - 3] + "..."
 
-        if len(summary) > available:
-            summary = summary[:available - 3] + "..."
-
     post_text = f"{summary}\n{url}"
-
 
     print("[DRY RUN] 投稿内容:")
     print(post_text)
