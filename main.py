@@ -129,11 +129,11 @@ def main():
     # state保存
     save_processed(processed_data)
 
-print("=== Bluesky 接続テスト ===")
+    print("=== Bluesky 接続テスト ===")
 
-bluesky.post("Bot接続テスト\nhttps://example.com")
+    bluesky.post("Bot接続テスト\nhttps://example.com")
 
-print("=== 投稿テスト完了 ===")
+    print("=== 投稿テスト完了 ===")
 
     print("=== main.py end ===")
 
