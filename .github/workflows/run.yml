@@ -40,6 +40,9 @@ jobs:
 
       - name: Run bot
         run: python main.py
+        env:
+          BLUESKY_IDENTIFIER: ${{ secrets.BLUESKY_IDENTIFIER }}
+          BLUESKY_APP_PASSWORD: ${{ secrets.BLUESKY_APP_PASSWORD }}
 
       - name: Upload processed URLs
         uses: actions/upload-artifact@v4
