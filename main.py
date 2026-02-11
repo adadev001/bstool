@@ -19,7 +19,6 @@ DRY_RUN = True
 
 bluesky = BlueskyClient(dry_run=DRY_RUN)
 
-
 # ==============================
 # state 読み込み
 # ==============================
@@ -30,7 +29,6 @@ def load_processed():
     with open(STATE_FILE, "r") as f:
         return json.load(f)
 
-
 # ==============================
 # state 保存
 # ==============================
@@ -39,9 +37,8 @@ def save_processed(data):
     with open(STATE_FILE, "w") as f:
         json.dump(data, f, indent=2)
 
-
 # ==============================
-# 本文取得（将来AI用）
+# 本文取得（AI用）
 # ==============================
 
 def extract_article_text(url):
@@ -62,7 +59,6 @@ def extract_article_text(url):
 
     return text.strip()
 
-
 # ==============================
 # 投稿フォーマット（140文字制限）
 # ==============================
@@ -74,12 +70,11 @@ def format_post(title, url, max_length=140):
         return base_text
 
     url_part = f"\n{url}"
-    available_length = max_length - len(url_part) - 3  # "..."分確保
+    available_length = max_length - len(url_part) - 3
 
     shortened_title = title[:available_length] + "..."
 
     return f"{shortened_title}{url_part}"
-
 
 # ==============================
 # RSS処理
@@ -114,17 +109,9 @@ def process_rss(site_name, site_config, processed_data):
     # --------------------------
     new_entries = []
 
-    # テスト用に変更するときは以下3行コメントアウト
     for entry in entries:
         if entry.link not in site_state["urls"]:
-           new_entries.append(entry)
-
-    # 強制テスト用コード
-    # ここから
-    #for entry in entries:
-    #    if True:
-    #        new_entries.append(entry)
-    # ここまで
+            new_entries.append(entry)
 
     if not new_entries:
         print(f"[{site_name}] 新着なし")
@@ -135,14 +122,21 @@ def process_rss(site_name, site_config, processed_data):
     for entry in new_entries:
         print(f"[{site_name}] 新着: {entry.title}")
 
-        # 本文取得（将来AI用）
+        # 本文取得（AI材料）
         article_text = extract_article_text(entry.link)
 
-        print("---- 本文先頭200文字 ----")
-        print(article_text[:200])
+        if not article_text:
+            print("本文取得失敗または空本文")
+            continue
+
+        # 1200文字抽出
+        ai_input_text = article_text[:1200]
+
+        print("---- 本文先頭1200文字 ----")
+        print(ai_input_text)
         print("------------------------")
 
-        # 140文字制限投稿
+        # 現在はタイトル投稿（次フェーズでAI要約に置換）
         post_text = format_post(entry.title, entry.link, max_length=140)
 
         if DRY_RUN:
@@ -154,7 +148,6 @@ def process_rss(site_name, site_config, processed_data):
         site_state["urls"].append(entry.link)
 
     processed_data[site_name] = site_state
-
 
 # ==============================
 # main
@@ -182,7 +175,6 @@ def main():
     save_processed(processed_data)
 
     print("=== main.py end ===")
-
 
 if __name__ == "__main__":
     main()
