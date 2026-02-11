@@ -3,6 +3,7 @@ import json
 import requests
 import feedparser
 from bs4 import BeautifulSoup
+import time
 
 # ========= 設定 =========
 DRY_RUN = True  # 本番時は False
@@ -60,8 +61,12 @@ def fetch_article_text(url, title):
 
 
 # ========= Gemini 要約 =========
-def summarize_with_gemini(text):
+def summarize_with_gemini(text, retries=3):
 
+    if not GEMINI_API_KEY:
+        print("GEMINI_API_KEY未設定")
+        return "要約失敗"
+   
     endpoint = (
         f"https://generativelanguage.googleapis.com/v1/"
         f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
@@ -79,24 +84,31 @@ def summarize_with_gemini(text):
 
     headers = {"Content-Type": "application/json"}
 
-    try:
-        response = requests.post(endpoint, headers=headers, json=data, timeout=20)
-        response.raise_for_status()
-        result = response.json()
+    for attempt in range(retries):
+        try:
+            response = requests.post(endpoint, headers=headers, json=data, timeout=20)
+            response.raise_for_status()
+            result = response.json()
 
-        summary = (
-            result.get("candidates", [{}])[0]
-            .get("content", {})
-            .get("parts", [{}])[0]
-            .get("text", "")
-        )
+            summary = (
+                result.get("candidates", [{}])[0]
+                .get("content", {})
+                .get("parts", [{}])[0]
+                .get("text", "")
+            )
 
-        return summary.strip()
+            summary = summary.strip()
+            summary = summary.replace("120字以内の要約：", "").strip()
 
-    except Exception as e:
-        print("Geminiエラー:", e)
-        return "要約失敗"
+            return summary if summary else "要約失敗"
 
+        except requests.exceptions.RequestException as e:
+            print(f"Geminiエラー（{attempt+1}/{retries}）:", e)
+
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)  # 1秒→2秒→4秒
+            else:
+                return "要約失敗"
 
 
 # ========= RSS処理 =========
