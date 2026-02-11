@@ -125,6 +125,10 @@ def process_rss(site_name, site_config, processed_data):
         if entry.link not in site_state["urls"]:
             new_entries.append(entry)
 
+         # ★ テスト用：最大1記事だけ処理
+        if new_entries:
+            new_entries = new_entries[:1]
+
     if not new_entries:
         print(f"[{site_name}] 新着なし")
         return
