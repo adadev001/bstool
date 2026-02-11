@@ -158,9 +158,10 @@ def process_rss(site_name, site_config, processed_data):
         summary = summarize_with_gemini(ai_input_text)
 
         if summary:
-            if len(summary) > 140:
-                summary = summary[:137] + "..."
-            post_text = f"{summary}\n{entry.link}"
+            max_length = 140 - len(entry.link) - 1
+            if len(summary) > max_length:
+                summary = summary[:max_length - 3] + "..."
+                post_text = f"{summary}\n{entry.link}"
         else:
             print("AI失敗のためタイトル投稿へフォールバック")
             post_text = f"{entry.title}\n{entry.link}"
