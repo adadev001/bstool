@@ -12,10 +12,11 @@ settings:
 # サイト定義
 # ============================================
 sites:
+
   # ------------------------------------------
   # The Hacker News
   # ------------------------------------------
-  - name: thehackernews
+  thehackernews:
     display_name: The Hacker News
     type: rss                  # 処理方式
     url: https://feeds.feedburner.com/TheHackersNews
@@ -25,7 +26,7 @@ sites:
   # ------------------------------------------
   # Security NEXT
   # ------------------------------------------
-  - name: securitynext
+  securitynext:
     display_name: Security NEXT
     type: rss
     url: https://www.security-next.com/feed
