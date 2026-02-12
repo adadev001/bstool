@@ -120,15 +120,25 @@ def fetch_nvd(site_config):
 # Gemini要約
 # =========================
 def summarize_with_gemini(text):
+    if not text:
+        return ""
+
     if not GEMINI_API_KEY:
         return text[:120]
 
     endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
+    prompt = f"""
+以下の記事内容を日本語で120文字以内に要約してください。
+英語の場合は日本語に翻訳してから要約してください。
+
+{text}
+"""
+
     payload = {
         "contents": [{
             "parts": [{
-                "text": f"次の内容を日本語で120文字以内で要約してください:\n{text}"
+                "text": prompt
             }]
         }]
     }
@@ -137,7 +147,8 @@ def summarize_with_gemini(text):
         response = requests.post(endpoint, json=payload, timeout=30)
         response.raise_for_status()
         data = response.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        result = data["candidates"][0]["content"]["parts"][0]["text"]
+        return result.strip()
     except Exception:
         return text[:120]
 
