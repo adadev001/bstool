@@ -4,7 +4,7 @@ import yaml
 import requests
 import feedparser
 from datetime import datetime, timedelta
-from atproto import Client
+from atproto import Client, models
 
 # =========================
 # 環境変数
@@ -159,15 +159,32 @@ def format_post(title, summary, url):
 # =========================
 # Bluesky投稿
 # =========================
-def post_to_bluesky(text):
+def post_to_bluesky(text, url):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
         print("Bluesky認証情報未設定")
         return
 
     client = Client()
     client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
-    client.send_post(text)
-    print("Bluesky投稿成功")
+
+    start = text.find(url)
+    end = start + len(url)
+
+    facets = [
+        models.AppBskyRichtextFacet.Main(
+            index=models.AppBskyRichtextFacet.ByteSlice(
+                byteStart=len(text[:start].encode("utf-8")),
+                byteEnd=len(text[:end].encode("utf-8")),
+            ),
+            features=[
+                models.AppBskyRichtextFacet.Link(uri=url)
+            ],
+        )
+    ]
+
+    client.send_post(text=text, facets=facets)
+
+    print("Bluesky投稿成功（リンク付き）")
 
 
 # =========================
@@ -217,7 +234,7 @@ def main():
         for item in new_items[:1]:
             summary = summarize_with_gemini(item["description"])
             post_text = format_post(item["title"], summary, item["url"])
-            post_to_bluesky(post_text)
+            post_to_bluesky(post_text, item["url"])
             site_urls.add(item["url"])
 
         if not new_items:
