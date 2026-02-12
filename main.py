@@ -229,16 +229,27 @@ def main():
 
         new_items = [i for i in items if i["url"] not in site_urls]
 
+
         # 初回スキップ
         if is_first_run and settings.get("skip_existing_on_first_run", True):
             print("初回のためスキップ")
             processed_state[site_id] = [i["url"] for i in items]
             continue
 
+        # ===== 強制テストモード =====
+        if items:
+            print("強制テスト投稿モード")
+            new_items = [items[0]]
+        # ===========================
+
         # 投稿（最大1件）
         for item in new_items[:1]:
             summary = summarize_with_gemini(item["description"])
             post_text = format_post(item["title"], summary, item["url"])
+ 
+            print("POST TEXT:\n", post_text)
+            print("URL:", item["url"])
+ 
             post_to_bluesky(post_text, item["url"])
             site_urls.add(item["url"])
 
