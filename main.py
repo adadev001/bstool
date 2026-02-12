@@ -4,7 +4,7 @@ import yaml
 import requests
 import feedparser
 from datetime import datetime, timedelta
-from atproto import Client
+from atproto import Client, models
 
 # =========================
 # 環境変数
@@ -181,8 +181,33 @@ def post_to_bluesky(text, url):
     client = Client()
     client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
 
-    client.send_post(text=text)
-    print("Bluesky投稿成功（自動リンク）")
+    start_char = text.find(url)
+    if start_char == -1:
+    # URLが見つからない場合はfacetなしで投稿
+        client.send_post(text=text)
+        print("URL位置検出失敗（facetなし投稿）")
+        return
+    end_char = start_char + len(url)
+
+    # 文字位置 → UTF-8バイト位置へ変換
+    start_byte = len(text[:start_char].encode("utf-8"))
+    end_byte = len(text[:end_char].encode("utf-8"))
+
+    facets = [
+        models.AppBskyRichtextFacet.Main(
+            index=models.AppBskyRichtextFacet.ByteSlice(
+                byteStart=start_byte,
+                byteEnd=end_byte,
+            ),
+            features=[
+                models.AppBskyRichtextFacet.Link(uri=url)
+            ],
+        )
+    ]
+
+    client.send_post(text=text, facets=facets)
+
+    print("Bluesky投稿成功（facetリンク）")
 
 
 # =========================

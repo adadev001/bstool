@@ -2,4 +2,4 @@ feedparser
 PyYAML
 requests
 beautifulsoup4
-atproto
+atproto>=0.0.56
