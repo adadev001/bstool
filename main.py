@@ -168,6 +168,11 @@ def post_to_bluesky(text, url):
     client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
 
     start = text.find(url)
+    if start == -1:
+        client.send_post(text=text)
+        print("Bluesky投稿成功（リンクなしフォールバック）")
+        return
+
     end = start + len(url)
 
     facets = [
