@@ -1,287 +1,142 @@
 import os
 import json
-import yaml
-import requests
-import feedparser
 import re
-from datetime import datetime, timedelta
-from atproto import Client, models
-
-# =========================
-# 環境変数
-# =========================
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-BLUESKY_HANDLE = os.getenv("BLUESKY_IDENTIFIER")
-BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD")
+import feedparser
+import requests
+from google import genai
+from google.genai import types
 
 STATE_FILE = "processed_urls.json"
 SITES_FILE = "sites.yaml"
+MODEL_NAME = "gemini-2.5-flash-lite"  # ★ 固定
 
+# -----------------------------
+# HTMLタグ除去
+# -----------------------------
+def clean_html(text):
+    return re.sub('<.*?>', '', text or "")
 
-# =========================
-# 状態管理
-# =========================
+# -----------------------------
+# 状態読み込み
+# -----------------------------
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return {}, True
+        return {}
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-    with open(STATE_FILE, "r") as f:
-        try:
-            data = json.load(f)
-        except json.JSONDecodeError:
-            return {}, True
-
-    if not data:
-        return {}, True
-
-    return data, False
-
-
+# -----------------------------
+# 状態保存
+# -----------------------------
 def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
 
+# -----------------------------
+# Gemini 要約（英語なら翻訳→要約）
+# -----------------------------
+def summarize_text(text):
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY が設定されていません")
 
-# =========================
-# sites.yaml 読み込み
-# =========================
-def load_sites():
-    with open(SITES_FILE, "r") as f:
-        return yaml.safe_load(f)
-
-
-# =========================
-# RSS取得
-# =========================
-def fetch_rss(site_config):
-    feed = feedparser.parse(site_config["url"])
-    items = []
-
-    for entry in feed.entries[: site_config.get("max_items", 50)]:
-        items.append({
-            "title": entry.get("title", ""),
-            "description": entry.get("summary", ""),
-            "url": entry.get("link")
-        })
-
-    return items
-
-
-# =========================
-# NVD API取得
-# =========================
-def fetch_nvd(site_config):
-    threshold = site_config.get("cvss_threshold", 7.0)
-    base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-
-    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
-    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
-
-    params = {
-        "pubStartDate": yesterday,
-        "pubEndDate": now,
-        "resultsPerPage": site_config.get("max_items", 50)
-    }
-
-    response = requests.get(base_url, params=params, timeout=30)
-    response.raise_for_status()
-
-    data = response.json()
-    results = []
-
-    for item in data.get("vulnerabilities", []):
-        cve = item.get("cve", {})
-        cve_id = cve.get("id")
-
-        description = next(
-            (d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"),
-            ""
-        )
-
-        metrics = cve.get("metrics", {})
-        score = None
-
-        if "cvssMetricV31" in metrics:
-            score = metrics["cvssMetricV31"][0]["cvssData"]["baseScore"]
-        elif "cvssMetricV30" in metrics:
-            score = metrics["cvssMetricV30"][0]["cvssData"]["baseScore"]
-
-        if score and score >= threshold:
-            results.append({
-                "title": f"{cve_id} (CVSS {score})",
-                "description": description,
-                "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}"
-            })
-
-    return results
-
-
-# =========================
-# HTML除去
-# =========================
-def clean_html(text):
-    if not text:
-        return ""
-    text = re.sub('<.*?>', '', text)
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-
-# =========================
-# Gemini要約（英語→日本語対応）
-# =========================
-def summarize_with_gemini(text):
-    if not text:
-        return ""
-
-    if not GEMINI_API_KEY:
-        return text[:120]
-
-    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+    client = genai.Client(api_key=api_key)
 
     prompt = f"""
-以下の記事内容を日本語で120文字以内に要約してください。
-英語の場合は日本語に翻訳してから要約してください。
+あなたはITニュース専門の編集者です。
 
+以下の文章を処理してください。
+
+1. 英語の場合は必ず自然な日本語に翻訳する
+2. その内容を140文字以内で要約する
+3. 出力は要約本文のみ
+
+本文:
 {text}
 """
 
-    payload = {
-        "contents": [{
-            "parts": [{
-                "text": prompt
-            }]
-        }]
-    }
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.3,
+        ),
+    )
 
-    try:
-        response = requests.post(endpoint, json=payload, timeout=30)
-        response.raise_for_status()
-        data = response.json()
-        result = data["candidates"][0]["content"]["parts"][0]["text"]
-        return result.strip()
-    except Exception:
-        return text[:120]
+    return response.text.strip()
 
+# -----------------------------
+# 140文字整形
+# -----------------------------
+def format_post(summary, url):
+    base = f"{summary}\n{url}"
+    if len(base) <= 140:
+        return base
 
-# =========================
-# 投稿整形（URLは必ず残す）
-# =========================
-def format_post(title, summary, url):
-    title = title.strip()
-    summary = summary.strip()
-    url = url.strip()
+    allowed = 140 - len(url) - 1
+    trimmed = summary[:allowed - 3] + "..."
+    return f"{trimmed}\n{url}"
 
-    text_part = f"{title}\n{summary}"
+# -----------------------------
+# Bluesky投稿
+# -----------------------------
+def post_to_bluesky(text):
+    from atproto import Client
 
-    # 本文最大120文字固定（安全）
-    if len(text_part) > 120:
-        text_part = text_part[:117] + "..."
+    identifier = os.getenv("BLUESKY_IDENTIFIER")
+    password = os.getenv("BLUESKY_PASSWORD")
 
-    return f"{text_part}\n{url}"
-
-
-# =========================
-# Bluesky投稿（facetリンク）
-# =========================
-def post_to_bluesky(text, url):
-    if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
-        print("Bluesky認証情報未設定")
-        return
+    if not identifier or not password:
+        raise ValueError("Blueskyの認証情報が未設定です")
 
     client = Client()
-    client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
+    client.login(identifier, password)
+    client.send_post(text=text)
 
-    start_char = text.find(url)
-    if start_char == -1:
-        client.send_post(text=text)
-        print("URL位置検出失敗（facetなし投稿）")
-        return
-
-    end_char = start_char + len(url)
-
-    start_byte = len(text[:start_char].encode("utf-8"))
-    end_byte = len(text[:end_char].encode("utf-8"))
-
-    facets = [
-        models.AppBskyRichtextFacet.Main(
-            index=models.AppBskyRichtextFacet.ByteSlice(
-                byteStart=start_byte,
-                byteEnd=end_byte,
-            ),
-            features=[
-                models.AppBskyRichtextFacet.Link(uri=url)
-            ],
-        )
-    ]
-
-    client.send_post(text=text, facets=facets)
-    print("Bluesky投稿成功（facetリンク）")
-
-
-# =========================
+# -----------------------------
 # メイン処理
-# =========================
+# -----------------------------
 def main():
-    print("STATE_FILE exists:", os.path.exists(STATE_FILE))
-    config = load_sites()
-    settings = config.get("settings", {})
-    sites = config.get("sites", {})
+    import yaml
 
-    processed_state, is_first_run = load_state()
+    state = load_state()
 
-    if not isinstance(processed_state, dict):
-        processed_state = {}
+    with open(SITES_FILE, "r", encoding="utf-8") as f:
+        config = yaml.safe_load(f)
 
-    for site_id, site in sites.items():
+    sites = config.get("sites", [])
 
-        if not site.get("enabled", False):
-            continue
+    for site in sites:
+        site_name = site["name"]
+        feed_url = site["url"]
 
-        print(f"--- {site.get('display_name')} ---")
+        if site_name not in state:
+            state[site_name] = []
 
-        site_urls = set(processed_state.get(site_id, []))
+        feed = feedparser.parse(feed_url)
 
-        try:
-            if site["type"] == "rss":
-                items = fetch_rss(site)
-            elif site["type"] == "nvd_api":
-                items = fetch_nvd(site)
-            else:
+        for entry in feed.entries:
+            url = entry.link
+
+            if url in state[site_name]:
                 continue
-        except Exception as e:
-            print("取得エラー:", e)
-            continue
 
-        new_items = [i for i in items if i["url"] not in site_urls]
+            print(f"New article: {entry.title}")
 
-        if is_first_run and settings.get("skip_existing_on_first_run", True):
-            print("初回のためスキップ")
-            processed_state[site_id] = [i["url"] for i in items]
-            continue
+            summary_source = clean_html(entry.get("summary", entry.title))
 
-        if settings.get("force_test_mode", False) and items:
-            print("強制テスト投稿モード")
-            new_items = [items[0]]
+            try:
+                summary = summarize_text(summary_source)
+                post_text = format_post(summary, url)
+                post_to_bluesky(post_text)
+                print("Posted to Bluesky")
 
-        for item in new_items[:1]:
-            cleaned = clean_html(item["description"])
-            summary = summarize_with_gemini(cleaned)
+                state[site_name].append(url)
 
-            post_text = format_post(item["title"], summary, item["url"])
+            except Exception as e:
+                print("Error:", e)
 
-            print("POST TEXT:\n", post_text)
-            print("URL:", item["url"])
-
-            post_to_bluesky(post_text, item["url"])
-            site_urls.add(item["url"])
-
-        if not new_items:
-            print("新着なし")
-
-        processed_state[site_id] = list(site_urls)
-
-    save_state(processed_state)
+    save_state(state)
 
 
 if __name__ == "__main__":
