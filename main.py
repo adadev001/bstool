@@ -146,15 +146,23 @@ def summarize_with_gemini(text):
 # 投稿整形（140文字）
 # =========================
 def format_post(title, summary, url):
-    post = f"{title}\n{summary}\n{url}"
-    if len(post) > 140:
-        allowed = 140 - len(title) - len(url) - 5
-        if allowed < 0:
-            allowed = 0
-        summary = summary[:allowed] + "..."
-        post = f"{title}\n{summary}\n{url}"
-    return post
+    title = title.strip()
+    summary = summary.strip()
+    url = url.strip()
 
+    max_len = 140
+
+    # URL分は必ず確保
+    reserved = len(url) + 1  # 改行分
+
+    allowed_text_len = max_len - reserved
+
+    text_part = f"{title}\n{summary}"
+
+    if len(text_part) > allowed_text_len:
+        text_part = text_part[:allowed_text_len - 3] + "..."
+
+    return f"{text_part}\n{url}"
 
 # =========================
 # Bluesky投稿
