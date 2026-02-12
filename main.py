@@ -140,6 +140,8 @@ def format_post(title, summary, url):
     post = f"{title}\n{summary}\n{url}"
     if len(post) > 140:
         allowed = 140 - len(title) - len(url) - 5
+        if allowed < 0:
+            allowed = 0
         summary = summary[:allowed] + "..."
         post = f"{title}\n{summary}\n{url}"
     return post
@@ -202,6 +204,9 @@ def main():
             post_text = format_post(item["title"], summary, item["url"])
             post_to_bluesky(post_text)
             all_new_urls.add(item["url"])
+
+        if not new_items:
+            print("新着なし")
 
     save_state(all_new_urls)
 
