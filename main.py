@@ -3,6 +3,7 @@ import json
 import yaml
 import requests
 import feedparser
+import re
 from datetime import datetime, timedelta
 from atproto import Client, models
 
@@ -18,7 +19,7 @@ SITES_FILE = "sites.yaml"
 
 
 # =========================
-# 状態管理（辞書型）
+# 状態管理
 # =========================
 def load_state():
     if not os.path.exists(STATE_FILE):
@@ -30,7 +31,7 @@ def load_state():
         except json.JSONDecodeError:
             return {}, True
 
-    if not data:  # 空辞書なら初回扱い
+    if not data:
         return {}, True
 
     return data, False
@@ -71,7 +72,6 @@ def fetch_rss(site_config):
 # =========================
 def fetch_nvd(site_config):
     threshold = site_config.get("cvss_threshold", 7.0)
-
     base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
     yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
@@ -117,7 +117,18 @@ def fetch_nvd(site_config):
 
 
 # =========================
-# Gemini要約
+# HTML除去
+# =========================
+def clean_html(text):
+    if not text:
+        return ""
+    text = re.sub('<.*?>', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+
+# =========================
+# Gemini要約（英語→日本語対応）
 # =========================
 def summarize_with_gemini(text):
     if not text:
@@ -154,35 +165,24 @@ def summarize_with_gemini(text):
 
 
 # =========================
-# 投稿整形（140文字）
+# 投稿整形（URLは必ず残す）
 # =========================
 def format_post(title, summary, url):
     title = title.strip()
     summary = summary.strip()
     url = url.strip()
 
-    max_len = 140
-
-    reserved = len(url) + 1  # 改行
-    allowed_text_len = max_len - reserved
-
-    if allowed_text_len <= 0:
-        # URLだけ投稿（最悪ケース）
-        return url
-
     text_part = f"{title}\n{summary}"
 
-    if len(text_part) > allowed_text_len:
-        if allowed_text_len > 3:
-            text_part = text_part[:allowed_text_len - 3] + "..."
-        else:
-            text_part = text_part[:allowed_text_len]
+    # 本文最大120文字固定（安全）
+    if len(text_part) > 120:
+        text_part = text_part[:117] + "..."
 
     return f"{text_part}\n{url}"
 
 
 # =========================
-# Bluesky投稿
+# Bluesky投稿（facetリンク）
 # =========================
 def post_to_bluesky(text, url):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
@@ -194,13 +194,12 @@ def post_to_bluesky(text, url):
 
     start_char = text.find(url)
     if start_char == -1:
-    # URLが見つからない場合はfacetなしで投稿
         client.send_post(text=text)
         print("URL位置検出失敗（facetなし投稿）")
         return
+
     end_char = start_char + len(url)
 
-    # 文字位置 → UTF-8バイト位置へ変換
     start_byte = len(text[:start_char].encode("utf-8"))
     end_byte = len(text[:end_char].encode("utf-8"))
 
@@ -217,12 +216,11 @@ def post_to_bluesky(text, url):
     ]
 
     client.send_post(text=text, facets=facets)
-
     print("Bluesky投稿成功（facetリンク）")
 
 
 # =========================
-# メイン（辞書型state対応）
+# メイン処理
 # =========================
 def main():
     print("STATE_FILE exists:", os.path.exists(STATE_FILE))
@@ -232,7 +230,6 @@ def main():
 
     processed_state, is_first_run = load_state()
 
-    # 念のためdict保証
     if not isinstance(processed_state, dict):
         processed_state = {}
 
@@ -258,8 +255,6 @@ def main():
 
         new_items = [i for i in items if i["url"] not in site_urls]
 
-
-        # 初回スキップ
         if is_first_run and settings.get("skip_existing_on_first_run", True):
             print("初回のためスキップ")
             processed_state[site_id] = [i["url"] for i in items]
@@ -269,14 +264,15 @@ def main():
             print("強制テスト投稿モード")
             new_items = [items[0]]
 
-        # 投稿（最大1件）
         for item in new_items[:1]:
-            summary = summarize_with_gemini(item["description"])
+            cleaned = clean_html(item["description"])
+            summary = summarize_with_gemini(cleaned)
+
             post_text = format_post(item["title"], summary, item["url"])
- 
+
             print("POST TEXT:\n", post_text)
             print("URL:", item["url"])
- 
+
             post_to_bluesky(post_text, item["url"])
             site_urls.add(item["url"])
 
