@@ -10,7 +10,7 @@ from atproto import Client
 # 環境変数
 # =========================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
+BLUESKY_HANDLE = os.getenv("BLUESKY_IDENTIFIER")
 BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD")
 
 STATE_FILE = "processed_urls.json"
@@ -18,18 +18,18 @@ SITES_FILE = "sites.yaml"
 
 
 # =========================
-# 状態管理
+# 状態管理（辞書型）
 # =========================
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return set(), True
+        return {}, True
     with open(STATE_FILE, "r") as f:
-        return set(json.load(f)), False
+        return json.load(f), False
 
 
-def save_state(urls):
+def save_state(state):
     with open(STATE_FILE, "w") as f:
-        json.dump(list(urls), f, indent=2)
+        json.dump(state, f, indent=2)
 
 
 # =========================
@@ -162,16 +162,18 @@ def post_to_bluesky(text):
 
 
 # =========================
-# メイン
+# メイン（辞書型state対応）
 # =========================
 def main():
     config = load_sites()
     settings = config.get("settings", {})
     sites = config.get("sites", {})
 
-    processed_urls, is_first_run = load_state()
+    processed_state, is_first_run = load_state()
 
-    all_new_urls = set(processed_urls)
+    # 念のためdict保証
+    if not isinstance(processed_state, dict):
+        processed_state = {}
 
     for site_id, site in sites.items():
 
@@ -179,6 +181,8 @@ def main():
             continue
 
         print(f"--- {site.get('display_name')} ---")
+
+        site_urls = set(processed_state.get(site_id, []))
 
         try:
             if site["type"] == "rss":
@@ -191,24 +195,27 @@ def main():
             print("取得エラー:", e)
             continue
 
-        new_items = [i for i in items if i["url"] not in processed_urls]
+        new_items = [i for i in items if i["url"] not in site_urls]
 
+        # 初回スキップ
         if is_first_run and settings.get("skip_existing_on_first_run", True):
             print("初回のためスキップ")
-            for i in items:
-                all_new_urls.add(i["url"])
+            processed_state[site_id] = [i["url"] for i in items]
             continue
 
+        # 投稿（最大1件）
         for item in new_items[:1]:
             summary = summarize_with_gemini(item["description"])
             post_text = format_post(item["title"], summary, item["url"])
             post_to_bluesky(post_text)
-            all_new_urls.add(item["url"])
+            site_urls.add(item["url"])
 
         if not new_items:
             print("新着なし")
 
-    save_state(all_new_urls)
+        processed_state[site_id] = list(site_urls)
+
+    save_state(processed_state)
 
 
 if __name__ == "__main__":
