@@ -3,3 +3,4 @@ PyYAML
 requests
 beautifulsoup4
 atproto>=0.0.56
+google-generativeai

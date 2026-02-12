@@ -3,8 +3,7 @@ import json
 import re
 import feedparser
 import requests
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 
 STATE_FILE = "processed_urls.json"
 SITES_FILE = "sites.yaml"
@@ -40,30 +39,27 @@ def summarize_text(text):
     if not api_key:
         raise ValueError("GEMINI_API_KEY が設定されていません")
 
-    client = genai.Client(api_key=api_key)
+    genai.configure(api_key=api_key)
+
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
     prompt = f"""
 あなたはITニュース専門の編集者です。
 
-以下の文章を処理してください。
+以下を処理してください。
 
-1. 英語の場合は必ず自然な日本語に翻訳する
-2. その内容を140文字以内で要約する
-3. 出力は要約本文のみ
+1. 英語なら日本語に翻訳
+2. 140文字以内で要約
+3. 要約本文のみ出力
 
 本文:
 {text}
 """
 
-    response = client.models.generate_content(
-        model=MODEL_NAME,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-        ),
-    )
+    response = model.generate_content(prompt)
 
     return response.text.strip()
+
 
 # -----------------------------
 # 140文字整形
