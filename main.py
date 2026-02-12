@@ -1,21 +1,35 @@
 import os
+import json
 import requests
 from datetime import datetime, timedelta
-import time
+from atproto import Client
 
 # ========= 設定 =========
-DRY_RUN = True  # 本番時は False
+STATE_FILE = "processed_urls.json"
 CVSS_THRESHOLD = 7.0
-MAX_POST_ITEMS = 3
+MAX_POST_ITEMS = 1  # 1日1回想定
 
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
+BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD")
 
-# ========= NVD API取得 =========
+# ========= 状態管理 =========
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return set(), True  # 初回
+    with open(STATE_FILE, "r") as f:
+        return set(json.load(f)), False
+
+def save_state(urls):
+    with open(STATE_FILE, "w") as f:
+        json.dump(list(urls), f, indent=2)
+
+# ========= NVD API =========
 def fetch_nvd_recent():
-
     base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
-    yesterday = (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z"
-    now = datetime.utcnow().isoformat() + "Z"
+    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
+    now = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
 
     params = {
         "pubStartDate": yesterday,
@@ -30,8 +44,8 @@ def fetch_nvd_recent():
     results = []
 
     for item in data.get("vulnerabilities", []):
-        cve = item["cve"]
-        cve_id = cve["id"]
+        cve = item.get("cve", {})
+        cve_id = cve.get("id")
 
         description = next(
             (d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"),
@@ -46,104 +60,96 @@ def fetch_nvd_recent():
         elif "cvssMetricV30" in metrics:
             score = metrics["cvssMetricV30"][0]["cvssData"]["baseScore"]
 
-        results.append({
-            "id": cve_id,
-            "description": description,
-            "score": score
-        })
+        if score and score >= CVSS_THRESHOLD:
+            url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+            results.append({
+                "id": cve_id,
+                "description": description,
+                "score": score,
+                "url": url
+            })
 
-    return results
+    return sorted(results, key=lambda x: x["score"], reverse=True)
 
+# ========= Gemini要約 =========
+def summarize_with_gemini(text):
+    if not GEMINI_API_KEY:
+        print("GEMINI_API_KEY未設定")
+        return text[:100]
 
-# ========= CVSSフィルタ =========
-def filter_high_severity(vulns, threshold):
-    return [
-        v for v in vulns
-        if v["score"] is not None and v["score"] >= threshold
-    ]
+    endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
-
-# ========= スコア順ソート =========
-def sort_by_score_desc(vulns):
-    return sorted(vulns, key=lambda x: x["score"], reverse=True)
-
-
-# ========= CVE API補完（任意） =========
-def fetch_cve_detail(cve_id):
-
-    url = f"https://cveawg.mitre.org/api/cve/{cve_id}"
+    payload = {
+        "contents": [{
+            "parts": [{
+                "text": f"次の脆弱性情報を日本語で簡潔に要約してください:\n{text}"
+            }]
+        }]
+    }
 
     try:
-        response = requests.get(url, timeout=15)
-
-        if response.status_code != 200:
-            return None
-
+        response = requests.post(endpoint, json=payload, timeout=30)
+        response.raise_for_status()
         data = response.json()
+        return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print("Gemini要約失敗:", e)
+        return text[:100]
 
-        return data["containers"]["cna"]["descriptions"][0]["value"]
+# ========= 投稿整形（140文字） =========
+def format_post(title, summary, url):
+    post = f"{title}\n{summary}\n{url}"
+    if len(post) > 140:
+        allowed = 140 - len(title) - len(url) - 5
+        summary = summary[:allowed] + "..."
+        post = f"{title}\n{summary}\n{url}"
+    return post
 
-    except Exception:
-        return None
-
-
-# ========= 投稿文生成 =========
-def build_daily_post(vulns):
-
-    if not vulns:
-        return "【本日の重大CVE】\nCVSS7.0以上の新規公開CVEは確認されませんでした。\n\nhttps://nvd.nist.gov/"
-
-    lines = ["【本日の重大CVE（CVSS 7.0以上）】"]
-
-    for v in vulns[:MAX_POST_ITEMS]:
-
-        line = f"{v['id']}"
-
-        if v["score"]:
-            line += f" (CVSS {v['score']})"
-
-        desc = v["description"].replace("\n", " ")
-        desc = desc[:80] + "..." if len(desc) > 80 else desc
-
-        line += f"\n{desc}"
-
-        lines.append(line)
-
-    lines.append("\n詳細:")
-    lines.append("https://nvd.nist.gov/")
-
-    return "\n\n".join(lines)
-
-
-# ========= Bluesky投稿（ダミー） =========
+# ========= Bluesky投稿 =========
 def post_to_bluesky(text):
-    print("=== Bluesky投稿 ===")
-    print(text)
-    # 本番時ここにAPI実装
+    if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
+        print("Bluesky認証情報未設定")
+        return
 
+    client = Client()
+    client.login(BLUESKY_HANDLE, BLUESKY_PASSWORD)
+    client.send_post(text)
+    print("Bluesky投稿成功")
 
 # ========= メイン =========
 def main():
+    print("=== Secure NVD Bot ===")
 
-    print("=== NVD Daily Secure Mode ===")
+    processed_urls, is_first_run = load_state()
 
     try:
         vulns = fetch_nvd_recent()
-
-        high = filter_high_severity(vulns, CVSS_THRESHOLD)
-
-        sorted_vulns = sort_by_score_desc(high)
-
-        post_text = build_daily_post(sorted_vulns)
-
-        if DRY_RUN:
-            print("[DRY RUN]")
-            print(post_text)
-        else:
-            post_to_bluesky(post_text)
-
     except Exception as e:
-        print("エラー:", e)
+        print("NVD取得エラー:", e)
+        return
+
+    new_items = [v for v in vulns if v["url"] not in processed_urls]
+
+    if is_first_run:
+        print("初回実行のため既存記事をスキップします")
+        save_state([v["url"] for v in vulns])
+        return
+
+    if not new_items:
+        print("新着なし")
+        return
+
+    for item in new_items[:MAX_POST_ITEMS]:
+        summary = summarize_with_gemini(item["description"])
+        post_text = format_post(
+            f"{item['id']} (CVSS {item['score']})",
+            summary,
+            item["url"]
+        )
+        post_to_bluesky(post_text)
+        processed_urls.add(item["url"])
+
+    save_state(processed_urls)
 
     print("=== end ===")
 
