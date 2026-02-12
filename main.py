@@ -23,8 +23,17 @@ SITES_FILE = "sites.yaml"
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {}, True
+
     with open(STATE_FILE, "r") as f:
-        return json.load(f), False
+        try:
+            data = json.load(f)
+        except json.JSONDecodeError:
+            return {}, True
+
+    if not data:  # 空辞書なら初回扱い
+        return {}, True
+
+    return data, False
 
 
 def save_state(state):
@@ -165,6 +174,7 @@ def post_to_bluesky(text):
 # メイン（辞書型state対応）
 # =========================
 def main():
+    print("STATE_FILE exists:", os.path.exists(STATE_FILE))
     config = load_sites()
     settings = config.get("settings", {})
     sites = config.get("sites", {})
