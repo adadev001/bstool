@@ -1,151 +1,151 @@
 import os
-import json
 import requests
-import feedparser
+from datetime import datetime, timedelta
 import time
 
 # ========= 設定 =========
 DRY_RUN = True  # 本番時は False
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-SITES = {
-    "thehackernews": {
-        "url": "https://feeds.feedburner.com/TheHackersNews"
-    },
-    "securitynext": {
-        "url": "https://www.security-next.com/feed"
-    }
-}
-
-STATE_FILE = "processed.json"
+CVSS_THRESHOLD = 7.0
+MAX_POST_ITEMS = 3
 
 
-# ========= 状態管理 =========
-def load_state():
-    if not os.path.exists(STATE_FILE):
-        return {}
-    with open(STATE_FILE, "r") as f:
-        return json.load(f)
+# ========= NVD API取得 =========
+def fetch_nvd_recent():
 
+    base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=2)
+    yesterday = (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z"
+    now = datetime.utcnow().isoformat() + "Z"
 
-
-# ========= Gemini 要約 =========
-def summarize_with_gemini(text, retries=3):
-
-    if not GEMINI_API_KEY:
-        print("GEMINI_API_KEY未設定")
-        return "要約失敗"
-
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1/"
-        f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
-    )
-
-    prompt = f"120字以内で要点を簡潔にまとめてください。\n{text}"
-
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": 160
-        }
+    params = {
+        "pubStartDate": yesterday,
+        "pubEndDate": now,
+        "resultsPerPage": 50
     }
 
-    headers = {"Content-Type": "application/json"}
+    response = requests.get(base_url, params=params, timeout=30)
+    response.raise_for_status()
 
-    for attempt in range(retries):
-        try:
-            response = requests.post(endpoint, headers=headers, json=data, timeout=20)
-            response.raise_for_status()
-            result = response.json()
+    data = response.json()
+    results = []
 
-            summary = (
-                result.get("candidates", [{}])[0]
-                .get("content", {})
-                .get("parts", [{}])[0]
-                .get("text", "")
-            ).strip()
+    for item in data.get("vulnerabilities", []):
+        cve = item["cve"]
+        cve_id = cve["id"]
 
-            return summary if summary else "要約失敗"
+        description = next(
+            (d["value"] for d in cve.get("descriptions", []) if d["lang"] == "en"),
+            ""
+        )
 
-        except requests.exceptions.RequestException as e:
-            print(f"Geminiエラー（{attempt+1}/{retries}）:", e)
+        metrics = cve.get("metrics", {})
+        score = None
 
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                return "要約失敗"
+        if "cvssMetricV31" in metrics:
+            score = metrics["cvssMetricV31"][0]["cvssData"]["baseScore"]
+        elif "cvssMetricV30" in metrics:
+            score = metrics["cvssMetricV30"][0]["cvssData"]["baseScore"]
+
+        results.append({
+            "id": cve_id,
+            "description": description,
+            "score": score
+        })
+
+    return results
 
 
-# ========= RSS処理 =========
-def process_rss(site_name, site_config, state):
-    print(f"[{site_name}] 処理開始")
+# ========= CVSSフィルタ =========
+def filter_high_severity(vulns, threshold):
+    return [
+        v for v in vulns
+        if v["score"] is not None and v["score"] >= threshold
+    ]
 
-    feed = feedparser.parse(site_config["url"])
-    entries = feed.entries
 
-    if site_name not in state:
-        state[site_name] = {"urls": []}
+# ========= スコア順ソート =========
+def sort_by_score_desc(vulns):
+    return sorted(vulns, key=lambda x: x["score"], reverse=True)
 
-    site_state = state[site_name]
-    new_entries = []
 
-    for entry in entries:
-        if entry.link not in site_state["urls"]:
-            new_entries.append(entry)
+# ========= CVE API補完（任意） =========
+def fetch_cve_detail(cve_id):
 
-    if not new_entries:
-        print(f"[{site_name}] 新着なし")
-        return
+    url = f"https://cveawg.mitre.org/api/cve/{cve_id}"
 
-    entry = new_entries[0]
+    try:
+        response = requests.get(url, timeout=15)
 
-    print(f"[{site_name}] 新着: {entry.title}")
+        if response.status_code != 200:
+            return None
 
-    # ★ RSSのtitle + summaryのみ使用（本文取得しない）
-    rss_text = f"{entry.title} {entry.summary}"
+        data = response.json()
 
-    summary = summarize_with_gemini(rss_text)
+        return data["containers"]["cna"]["descriptions"][0]["value"]
 
-    # ▼ URL込み120字制御
-    url = entry.link
-    max_total = 120
-    available = max_total - len(url) - 1
+    except Exception:
+        return None
 
-    if available < 10:
-        summary = "詳細はリンク参照"
-    else:
-        if len(summary) > available:
-            summary = summary[:available - 3] + "..."
 
-    post_text = f"{summary}\n{url}"
+# ========= 投稿文生成 =========
+def build_daily_post(vulns):
 
-    print("[DRY RUN] 投稿内容:")
-    print(post_text)
+    if not vulns:
+        return "【本日の重大CVE】\nCVSS7.0以上の新規公開CVEは確認されませんでした。\n\nhttps://nvd.nist.gov/"
 
-    if not DRY_RUN:
-        # Bluesky投稿処理を書く
-        pass
+    lines = ["【本日の重大CVE（CVSS 7.0以上）】"]
 
-    site_state["urls"].append(entry.link)
+    for v in vulns[:MAX_POST_ITEMS]:
+
+        line = f"{v['id']}"
+
+        if v["score"]:
+            line += f" (CVSS {v['score']})"
+
+        desc = v["description"].replace("\n", " ")
+        desc = desc[:80] + "..." if len(desc) > 80 else desc
+
+        line += f"\n{desc}"
+
+        lines.append(line)
+
+    lines.append("\n詳細:")
+    lines.append("https://nvd.nist.gov/")
+
+    return "\n\n".join(lines)
+
+
+# ========= Bluesky投稿（ダミー） =========
+def post_to_bluesky(text):
+    print("=== Bluesky投稿 ===")
+    print(text)
+    # 本番時ここにAPI実装
 
 
 # ========= メイン =========
 def main():
-    print("=== main.py start ===")
 
-    state = load_state()
+    print("=== NVD Daily Secure Mode ===")
 
-    for site_name, site_config in SITES.items():
-        process_rss(site_name, site_config, state)
+    try:
+        vulns = fetch_nvd_recent()
 
-    save_state(state)
+        high = filter_high_severity(vulns, CVSS_THRESHOLD)
 
-    print("=== main.py end ===")
+        sorted_vulns = sort_by_score_desc(high)
+
+        post_text = build_daily_post(sorted_vulns)
+
+        if DRY_RUN:
+            print("[DRY RUN]")
+            print(post_text)
+        else:
+            post_to_bluesky(post_text)
+
+    except Exception as e:
+        print("エラー:", e)
+
+    print("=== end ===")
 
 
 if __name__ == "__main__":
