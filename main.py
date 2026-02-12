@@ -2,21 +2,17 @@ import os
 import json
 import requests
 import feedparser
-from bs4 import BeautifulSoup
 import time
 
 # ========= 設定 =========
 DRY_RUN = True  # 本番時は False
-
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 SITES = {
     "thehackernews": {
-        "type": "rss",
         "url": "https://feeds.feedburner.com/TheHackersNews"
     },
     "securitynext": {
-        "type": "rss",
         "url": "https://www.security-next.com/feed"
     }
 }
@@ -37,48 +33,25 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
-# ========= 本文取得 =========
-def fetch_article_text(url, title):
-    try:
-        res = requests.get(url, timeout=10)
-        soup = BeautifulSoup(res.text, "html.parser")
-
-        paragraphs = soup.find_all("p")
-        text = " ".join(p.get_text() for p in paragraphs)
-
-        # 完全空白圧縮（最強版）
-        text = " ".join(text.split())
-
-        # タイトル追加
-        text = f"{title} {text}"
-
-        # 600文字制限
-        return text[:600]
-
-    except Exception as e:
-        print("本文取得エラー:", e)
-        return ""
-
-
 # ========= Gemini 要約 =========
 def summarize_with_gemini(text, retries=3):
 
     if not GEMINI_API_KEY:
         print("GEMINI_API_KEY未設定")
         return "要約失敗"
-   
+
     endpoint = (
         f"https://generativelanguage.googleapis.com/v1/"
         f"models/gemini-2.5-flash-lite:generateContent?key={GEMINI_API_KEY}"
     )
 
-    prompt = f"120字以内で要約。\n{text}"
+    prompt = f"120字以内で要点を簡潔にまとめてください。\n{text}"
 
     data = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "temperature": 0.2,
-            "maxOutputTokens": 160  # 200→160に削減
+            "maxOutputTokens": 160
         }
     }
 
@@ -95,10 +68,7 @@ def summarize_with_gemini(text, retries=3):
                 .get("content", {})
                 .get("parts", [{}])[0]
                 .get("text", "")
-            )
-
-            summary = summary.strip()
-            summary = summary.replace("120字以内の要約：", "").strip()
+            ).strip()
 
             return summary if summary else "要約失敗"
 
@@ -106,7 +76,7 @@ def summarize_with_gemini(text, retries=3):
             print(f"Geminiエラー（{attempt+1}/{retries}）:", e)
 
             if attempt < retries - 1:
-                time.sleep(2 ** attempt)  # 1秒→2秒→4秒
+                time.sleep(2 ** attempt)
             else:
                 return "要約失敗"
 
@@ -128,11 +98,6 @@ def process_rss(site_name, site_config, state):
         if entry.link not in site_state["urls"]:
             new_entries.append(entry)
 
-    # テストモード維持
-    if not new_entries and entries:
-        print(f"[{site_name}] テストモード：先頭記事を強制処理")
-        new_entries = [entries[0]]
-
     if not new_entries:
         print(f"[{site_name}] 新着なし")
         return
@@ -141,23 +106,15 @@ def process_rss(site_name, site_config, state):
 
     print(f"[{site_name}] 新着: {entry.title}")
 
-    article_text = fetch_article_text(entry.link, entry.title)
+    # ★ RSSのtitle + summaryのみ使用（本文取得しない）
+    rss_text = f"{entry.title} {entry.summary}"
 
-    if not article_text:
-        print("本文なし")
-        return
-
-    print("---- 本文先頭600文字 ----")
-    print(article_text)
-    print("------------------------")
-
-    summary = summarize_with_gemini(article_text)
+    summary = summarize_with_gemini(rss_text)
 
     # ▼ URL込み120字制御
     url = entry.link
     max_total = 120
-
-    available = max_total - len(url) - 1  # 改行分
+    available = max_total - len(url) - 1
 
     if available < 10:
         summary = "詳細はリンク参照"
@@ -170,12 +127,10 @@ def process_rss(site_name, site_config, state):
     print("[DRY RUN] 投稿内容:")
     print(post_text)
 
-    # 本番投稿
     if not DRY_RUN:
         # Bluesky投稿処理を書く
         pass
 
-    # 処理済み保存
     site_state["urls"].append(entry.link)
 
 
