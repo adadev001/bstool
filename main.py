@@ -3,7 +3,8 @@ import json
 import re
 import feedparser
 import requests
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
 STATE_FILE = "processed_urls.json"
 SITES_FILE = "sites.yaml"
@@ -39,16 +40,12 @@ def summarize_text(text):
     if not api_key:
         raise ValueError("GEMINI_API_KEY が設定されていません")
 
-    genai.configure(api_key=api_key)
-
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    client = genai.Client(api_key=api_key)
 
     prompt = f"""
 あなたはITニュース専門の編集者です。
 
-以下を処理してください。
-
-1. 英語なら日本語に翻訳
+1. 英語なら自然な日本語に翻訳
 2. 140文字以内で要約
 3. 要約本文のみ出力
 
@@ -56,7 +53,13 @@ def summarize_text(text):
 {text}
 """
 
-    response = model.generate_content(prompt)
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            temperature=0.3,
+        ),
+    )
 
     return response.text.strip()
 
@@ -100,18 +103,31 @@ def main():
     with open(SITES_FILE, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    sites = config.get("sites", [])
+    sites_dict = config.get("sites", {})
 
-    for site in sites:
-        site_name = site["name"]
-        feed_url = site["url"]
+    for site_key, site in sites_dict.items():
+
+        # enabled=false はスキップ
+        if not site.get("enabled", True):
+            continue
+
+        site_name = site_key
+        site_type = site.get("type", "rss")
+
+        if site_type != "rss":
+            # 今はrssのみ処理（nvd_apiは後で拡張）
+            continue
+
+        feed_url = site.get("url")
+        if not feed_url:
+            continue
 
         if site_name not in state:
             state[site_name] = []
 
         feed = feedparser.parse(feed_url)
 
-        for entry in feed.entries:
+        for entry in feed.entries[: site.get("max_items", 10)]:
             url = entry.link
 
             if url in state[site_name]:
