@@ -1,31 +1,68 @@
 import os
 import json
+import yaml
 import requests
+import feedparser
 from datetime import datetime, timedelta
 from atproto import Client
 
-# ========= 設定 =========
-STATE_FILE = "processed_urls.json"
-CVSS_THRESHOLD = 7.0
-MAX_POST_ITEMS = 1  # 1日1回想定
-
+# =========================
+# 環境変数
+# =========================
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 BLUESKY_HANDLE = os.getenv("BLUESKY_HANDLE")
 BLUESKY_PASSWORD = os.getenv("BLUESKY_PASSWORD")
 
-# ========= 状態管理 =========
+STATE_FILE = "processed_urls.json"
+SITES_FILE = "sites.yaml"
+
+
+# =========================
+# 状態管理
+# =========================
 def load_state():
     if not os.path.exists(STATE_FILE):
-        return set(), True  # 初回
+        return set(), True
     with open(STATE_FILE, "r") as f:
         return set(json.load(f)), False
+
 
 def save_state(urls):
     with open(STATE_FILE, "w") as f:
         json.dump(list(urls), f, indent=2)
 
-# ========= NVD API =========
-def fetch_nvd_recent():
+
+# =========================
+# sites.yaml 読み込み
+# =========================
+def load_sites():
+    with open(SITES_FILE, "r") as f:
+        return yaml.safe_load(f)
+
+
+# =========================
+# RSS取得
+# =========================
+def fetch_rss(site_config):
+    feed = feedparser.parse(site_config["url"])
+    items = []
+
+    for entry in feed.entries[: site_config.get("max_items", 50)]:
+        items.append({
+            "title": entry.get("title", ""),
+            "description": entry.get("summary", ""),
+            "url": entry.get("link")
+        })
+
+    return items
+
+
+# =========================
+# NVD API取得
+# =========================
+def fetch_nvd(site_config):
+    threshold = site_config.get("cvss_threshold", 7.0)
+
     base_url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
     yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S") + ".000Z"
@@ -34,7 +71,7 @@ def fetch_nvd_recent():
     params = {
         "pubStartDate": yesterday,
         "pubEndDate": now,
-        "resultsPerPage": 50
+        "resultsPerPage": site_config.get("max_items", 50)
     }
 
     response = requests.get(base_url, params=params, timeout=30)
@@ -60,29 +97,29 @@ def fetch_nvd_recent():
         elif "cvssMetricV30" in metrics:
             score = metrics["cvssMetricV30"][0]["cvssData"]["baseScore"]
 
-        if score and score >= CVSS_THRESHOLD:
-            url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+        if score and score >= threshold:
             results.append({
-                "id": cve_id,
+                "title": f"{cve_id} (CVSS {score})",
                 "description": description,
-                "score": score,
-                "url": url
+                "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}"
             })
 
-    return sorted(results, key=lambda x: x["score"], reverse=True)
+    return results
 
-# ========= Gemini要約 =========
+
+# =========================
+# Gemini要約
+# =========================
 def summarize_with_gemini(text):
     if not GEMINI_API_KEY:
-        print("GEMINI_API_KEY未設定")
-        return text[:100]
+        return text[:120]
 
     endpoint = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
     payload = {
         "contents": [{
             "parts": [{
-                "text": f"次の脆弱性情報を日本語で簡潔に要約してください:\n{text}"
+                "text": f"次の内容を日本語で120文字以内で要約してください:\n{text}"
             }]
         }]
     }
@@ -92,11 +129,13 @@ def summarize_with_gemini(text):
         response.raise_for_status()
         data = response.json()
         return data["candidates"][0]["content"]["parts"][0]["text"]
-    except Exception as e:
-        print("Gemini要約失敗:", e)
-        return text[:100]
+    except Exception:
+        return text[:120]
 
-# ========= 投稿整形（140文字） =========
+
+# =========================
+# 投稿整形（140文字）
+# =========================
 def format_post(title, summary, url):
     post = f"{title}\n{summary}\n{url}"
     if len(post) > 140:
@@ -105,7 +144,10 @@ def format_post(title, summary, url):
         post = f"{title}\n{summary}\n{url}"
     return post
 
-# ========= Bluesky投稿 =========
+
+# =========================
+# Bluesky投稿
+# =========================
 def post_to_bluesky(text):
     if not BLUESKY_HANDLE or not BLUESKY_PASSWORD:
         print("Bluesky認証情報未設定")
@@ -116,42 +158,52 @@ def post_to_bluesky(text):
     client.send_post(text)
     print("Bluesky投稿成功")
 
-# ========= メイン =========
+
+# =========================
+# メイン
+# =========================
 def main():
-    print("=== Secure NVD Bot ===")
+    config = load_sites()
+    settings = config.get("settings", {})
+    sites = config.get("sites", {})
 
     processed_urls, is_first_run = load_state()
 
-    try:
-        vulns = fetch_nvd_recent()
-    except Exception as e:
-        print("NVD取得エラー:", e)
-        return
+    all_new_urls = set(processed_urls)
 
-    new_items = [v for v in vulns if v["url"] not in processed_urls]
+    for site_id, site in sites.items():
 
-    if is_first_run:
-        print("初回実行のため既存記事をスキップします")
-        save_state([v["url"] for v in vulns])
-        return
+        if not site.get("enabled", False):
+            continue
 
-    if not new_items:
-        print("新着なし")
-        return
+        print(f"--- {site.get('display_name')} ---")
 
-    for item in new_items[:MAX_POST_ITEMS]:
-        summary = summarize_with_gemini(item["description"])
-        post_text = format_post(
-            f"{item['id']} (CVSS {item['score']})",
-            summary,
-            item["url"]
-        )
-        post_to_bluesky(post_text)
-        processed_urls.add(item["url"])
+        try:
+            if site["type"] == "rss":
+                items = fetch_rss(site)
+            elif site["type"] == "nvd_api":
+                items = fetch_nvd(site)
+            else:
+                continue
+        except Exception as e:
+            print("取得エラー:", e)
+            continue
 
-    save_state(processed_urls)
+        new_items = [i for i in items if i["url"] not in processed_urls]
 
-    print("=== end ===")
+        if is_first_run and settings.get("skip_existing_on_first_run", True):
+            print("初回のためスキップ")
+            for i in items:
+                all_new_urls.add(i["url"])
+            continue
+
+        for item in new_items[:1]:
+            summary = summarize_with_gemini(item["description"])
+            post_text = format_post(item["title"], summary, item["url"])
+            post_to_bluesky(post_text)
+            all_new_urls.add(item["url"])
+
+    save_state(all_new_urls)
 
 
 if __name__ == "__main__":
