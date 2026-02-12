@@ -152,17 +152,23 @@ def format_post(title, summary, url):
 
     max_len = 140
 
-    # URL分は必ず確保
-    reserved = len(url) + 1  # 改行分
-
+    reserved = len(url) + 1  # 改行
     allowed_text_len = max_len - reserved
+
+    if allowed_text_len <= 0:
+        # URLだけ投稿（最悪ケース）
+        return url
 
     text_part = f"{title}\n{summary}"
 
     if len(text_part) > allowed_text_len:
-        text_part = text_part[:allowed_text_len - 3] + "..."
+        if allowed_text_len > 3:
+            text_part = text_part[:allowed_text_len - 3] + "..."
+        else:
+            text_part = text_part[:allowed_text_len]
 
     return f"{text_part}\n{url}"
+
 
 # =========================
 # Bluesky投稿
@@ -223,11 +229,9 @@ def main():
             processed_state[site_id] = [i["url"] for i in items]
             continue
 
-        # ===== 強制テストモード =====
-        if items:
+        if settings.get("force_test_mode", False) and items:
             print("強制テスト投稿モード")
             new_items = [items[0]]
-        # ===========================
 
         # 投稿（最大1件）
         for item in new_items[:1]:
