@@ -210,11 +210,22 @@ def post_bluesky(identifier, password, text, url):
 # メイン処理
 # ==========================
 
+惜しいです。
+今のコードは インデントが壊れています。
+
+if TEST_SINGLE_POST: が main() の外に出ています。
+そのままだと構文的にも論理的にも正しく動きません。
+
+✅ 正しい構造
+
+TEST_SINGLE_POST ブロックは main() の中 に入れてください。
+
+🔧 修正版（そのまま置き換えOK）
 def main():
 
     logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(name)s:%(message)s"
+        level=logging.INFO,
+        format="%(levelname)s:%(name)s:%(message)s"
     )
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -224,20 +235,48 @@ def main():
     if not bluesky_id or not bluesky_pw:
         raise ValueError("Bluesky credentials not set")
 
-    FORCE_TEST = True
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY not set")
 
-    if FORCE_TEST:
-        logging.info("Force test post")
+    # ==========================
+    # ★ 1件だけ実データ投稿テスト
+    # ==========================
+    TEST_SINGLE_POST = True
 
-        test_url = "https://thehackernews.com/"
-        test_text = "Test embed post"
+    if TEST_SINGLE_POST:
+        logging.info("Test single real item")
 
-        post_bluesky(
-            bluesky_id,
-            bluesky_pw,
-            test_text,
-            test_url
-        )
+        config = load_config()
+        sites = config.get("sites", {})
+
+        for site_key, site in sites.items():
+            if not site.get("enabled", True):
+                continue
+
+            if site["type"] == "rss":
+                items = fetch_rss(site)
+            elif site["type"] == "nvd_api":
+                items = fetch_nvd(site)
+            else:
+                continue
+
+            if not items:
+                continue
+
+            item = items[0]
+
+            summary = summarize(item["text"], gemini_key)
+            post_text = format_post(site, summary, item["url"], item)
+
+            post_bluesky(
+                bluesky_id,
+                bluesky_pw,
+                post_text,
+                item["url"]
+            )
+
+            break  # 1サイトだけ投稿して終了
+
         return
 
 
