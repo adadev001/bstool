@@ -143,7 +143,9 @@ def fetch_nvd(site):
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
     params = {
-        "resultsPerPage": site.get("max_items", 50),
+        "resultsPerPage": site.get("max_items", 100),
+        "sortBy": "publishDate",
+        "sortOrder": "desc"
     }
 
     response = requests.get(url, params=params)
