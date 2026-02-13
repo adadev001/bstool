@@ -261,6 +261,16 @@ def main():
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
 
+    config = load_config()
+    settings = config.get("settings", {})
+    force_test = settings.get("force_test_mode", False)
+    sites = config.get("sites", {})
+
+    def get_summary(text):
+        if force_test:
+            return text[:200]
+        return summarize(text, gemini_key)
+
     TEST_SINGLE_POST = True
 
     # ==========================
@@ -269,9 +279,6 @@ def main():
     if TEST_SINGLE_POST:
 
         logging.info("Test single real item (all enabled sites)")
-
-        config = load_config()
-        sites = config.get("sites", {})
 
         for site_key, site in sites.items():
 
@@ -293,7 +300,7 @@ def main():
 
             item = items[0]
 
-            summary = summarize(item["text"], gemini_key)
+            summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
             post_bluesky(
@@ -311,18 +318,12 @@ def main():
     # ==========================
     # 本番モード
     # ==========================
-
-    config = load_config()
-    settings = config.get("settings", {})
-    sites = config.get("sites", {})
-
     state = load_state()
 
     if "_posted_cves" not in state:
         state["_posted_cves"] = []
 
     skip_first = settings.get("skip_existing_on_first_run", True)
-    force_test = settings.get("force_test_mode", False)
 
     for site_key, site in sites.items():
 
@@ -364,11 +365,7 @@ def main():
                 logging.info(f"Skip duplicate CVE (JVN): {cve_id}")
                 continue
 
-            if force_test:
-                summary = item["text"][:200]  # テスト中はそのまま
-            else:
-                summary = summarize(item["text"], gemini_key)
-
+            summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
             if force_test:
