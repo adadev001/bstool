@@ -268,7 +268,7 @@ def main():
     print("PW raw repr:", repr(bluesky_pw))
 
 
-    client = Client()
+    client = Client(base_url="https://bsky.social")
     client.login(bluesky_id, bluesky_pw)
 
     config = load_config()
