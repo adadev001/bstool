@@ -1,152 +1,226 @@
 import os
 import json
-import re
-import feedparser
 import requests
-from google import genai
-from google.genai import types
+import yaml
+import feedparser
+import logging
+import google.generativeai as genai
+from atproto import Client
 
-STATE_FILE = "processed_urls.json"
+# ==========================
+# 定数
+# ==========================
+
 SITES_FILE = "sites.yaml"
-MODEL_NAME = "gemini-2.5-flash-lite"  # ★ 固定
+STATE_FILE = "processed_urls.json"
+MAX_POST_LENGTH = 140
 
-# -----------------------------
-# HTMLタグ除去
-# -----------------------------
-def clean_html(text):
-    return re.sub('<.*?>', '', text or "")
 
-# -----------------------------
-# 状態読み込み
-# -----------------------------
+# ==========================
+# 設定読み込み
+# ==========================
+
+def load_config():
+    with open(SITES_FILE, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {}
     with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except:
+            return {}
 
-# -----------------------------
-# 状態保存
-# -----------------------------
+
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-# -----------------------------
-# Gemini 要約（英語なら翻訳→要約）
-# -----------------------------
-def summarize_text(text):
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("GEMINI_API_KEY が設定されていません")
 
-    client = genai.Client(api_key=api_key)
+def format_post(summary, url):
+    summary = summary.replace("\n", " ").strip()
+    allowed = MAX_POST_LENGTH - len(url) - 1
+    if len(summary) > allowed:
+        summary = summary[:allowed - 1] + "…"
+    return f"{summary} {url}"
+
+
+# ==========================
+# Gemini 要約
+# ==========================
+
+def summarize(text, api_key):
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
     prompt = f"""
-あなたはITニュース専門の編集者です。
+以下を日本語で簡潔に要約してください。
+事実のみ。
+誇張なし。
+100文字以内。
 
-1. 英語なら自然な日本語に翻訳
-2. 140文字以内で要約
-3. 要約本文のみ出力
-
-本文:
 {text}
 """
-
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-        ),
-    )
-
+    response = model.generate_content(prompt)
     return response.text.strip()
 
 
-# -----------------------------
-# 140文字整形
-# -----------------------------
-def format_post(summary, url):
-    base = f"{summary}\n{url}"
-    if len(base) <= 140:
-        return base
+# ==========================
+# RSS取得
+# ==========================
 
-    allowed = 140 - len(url) - 1
-    trimmed = summary[:allowed - 3] + "..."
-    return f"{trimmed}\n{url}"
+def fetch_rss(site):
+    feed = feedparser.parse(site["url"])
+    items = []
 
-# -----------------------------
+    for entry in feed.entries[:site.get("max_items", 50)]:
+        link = entry.get("link")
+        title = entry.get("title", "")
+        summary = entry.get("summary", "")
+
+        if not link:
+            continue
+
+        items.append({
+            "id": link,
+            "text": f"{title}\n{summary}",
+            "url": link
+        })
+
+    return items
+
+
+# ==========================
+# NVD API取得
+# ==========================
+
+def fetch_nvd(site):
+    url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+
+    params = {
+        "resultsPerPage": site.get("max_items", 50),
+    }
+
+    response = requests.get(url, params=params)
+    data = response.json()
+
+    items = []
+    threshold = float(site.get("cvss_threshold", 0))
+
+    for vuln in data.get("vulnerabilities", []):
+        cve = vuln.get("cve", {})
+        cve_id = cve.get("id")
+        descriptions = cve.get("descriptions", [])
+        metrics = cve.get("metrics", {})
+
+        score = 0
+        if "cvssMetricV31" in metrics:
+            score = metrics["cvssMetricV31"][0]["cvssData"]["baseScore"]
+
+        if score < threshold:
+            continue
+
+        description = ""
+        for d in descriptions:
+            if d.get("lang") == "en":
+                description = d.get("value")
+                break
+
+        if not cve_id:
+            continue
+
+        url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+
+        items.append({
+            "id": cve_id,
+            "text": f"{cve_id} (CVSS:{score})\n{description}",
+            "url": url
+        })
+
+    return items
+
+
+# ==========================
 # Bluesky投稿
-# -----------------------------
-def post_to_bluesky(text):
-    from atproto import Client
+# ==========================
 
-    identifier = os.getenv("BLUESKY_IDENTIFIER")
-    password = os.getenv("BLUESKY_PASSWORD")
-
-    if not identifier or not password:
-        raise ValueError("Blueskyの認証情報が未設定です")
-
+def post_bluesky(identifier, password, text):
     client = Client()
     client.login(identifier, password)
-    client.send_post(text=text)
+    client.send_post(text)
 
-# -----------------------------
+
+# ==========================
 # メイン処理
-# -----------------------------
+# ==========================
+
 def main():
-    import yaml
+    config = load_config()
+    settings = config.get("settings", {})
+    sites = config.get("sites", {})
+
+    logging.basicConfig(level=getattr(logging, settings.get("log_level", "INFO")))
 
     state = load_state()
 
-    with open(SITES_FILE, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    gemini_key = os.environ.get("GEMINI_API_KEY")
+    bluesky_id = os.environ.get("BLUESKY_IDENTIFIER")
+    bluesky_pw = os.environ.get("BLUESKY_PASSWORD")
 
-    sites_dict = config.get("sites", {})
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY not set")
 
-    for site_key, site in sites_dict.items():
+    skip_first = settings.get("skip_existing_on_first_run", True)
+    force_test = settings.get("force_test_mode", False)
 
-        # enabled=false はスキップ
+    for site_key, site in sites.items():
+
         if not site.get("enabled", True):
             continue
 
-        site_name = site_key
-        site_type = site.get("type", "rss")
+        if site_key not in state:
+            state[site_key] = []
 
-        if site_type != "rss":
-            # 今はrssのみ処理（nvd_apiは後で拡張）
+        logging.info(f"Processing: {site_key}")
+
+        if site["type"] == "rss":
+            items = fetch_rss(site)
+        elif site["type"] == "nvd_api":
+            items = fetch_nvd(site)
+        else:
+            logging.warning(f"Unknown type: {site['type']}")
             continue
 
-        feed_url = site.get("url")
-        if not feed_url:
+        # 初回処理
+        if not state[site_key] and skip_first:
+            logging.info("Initial run → skip existing")
+            state[site_key] = [item["id"] for item in items]
             continue
 
-        if site_name not in state:
-            state[site_name] = []
+        new_items = [
+            item for item in items
+            if item["id"] not in state[site_key]
+        ]
 
-        feed = feedparser.parse(feed_url)
+        if not new_items:
+            logging.info("No new items")
+            continue
 
-        for entry in feed.entries[: site.get("max_items", 10)]:
-            url = entry.link
+        # 1日1回想定 → 1件のみ
+        item = new_items[0]
 
-            if url in state[site_name]:
-                continue
+        summary = summarize(item["text"], gemini_key)
+        post_text = format_post(summary, item["url"])
 
-            print(f"New article: {entry.title}")
+        if force_test:
+            logging.info("[TEST MODE] " + post_text)
+        else:
+            post_bluesky(bluesky_id, bluesky_pw, post_text)
 
-            summary_source = clean_html(entry.get("summary", entry.title))
-
-            try:
-                summary = summarize_text(summary_source)
-                post_text = format_post(summary, url)
-                post_to_bluesky(post_text)
-                print("Posted to Bluesky")
-
-                state[site_name].append(url)
-
-            except Exception as e:
-                print("Error:", e)
+        state[site_key].append(item["id"])
 
     save_state(state)
 
