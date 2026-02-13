@@ -209,18 +209,6 @@ def post_bluesky(identifier, password, text, url):
 # ==========================
 # メイン処理
 # ==========================
-
-惜しいです。
-今のコードは インデントが壊れています。
-
-if TEST_SINGLE_POST: が main() の外に出ています。
-そのままだと構文的にも論理的にも正しく動きません。
-
-✅ 正しい構造
-
-TEST_SINGLE_POST ブロックは main() の中 に入れてください。
-
-🔧 修正版（そのまま置き換えOK）
 def main():
 
     logging.basicConfig(
