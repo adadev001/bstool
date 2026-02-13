@@ -180,8 +180,8 @@ def post_bluesky(identifier, password, text, url):
     client = Client()
     client.login(identifier, password)
 
-    # リンクカード生成
     try:
+        # --- card情報取得 ---
         resp = requests.get(
             "https://cardyb.bsky.app/v1/extract",
             params={"url": url},
@@ -189,19 +189,30 @@ def post_bluesky(identifier, password, text, url):
         )
         card = resp.json()
 
+        image_blob = None
+
+        # --- 画像がある場合 ---
+        image_url = card.get("image")
+        if image_url:
+            img_resp = requests.get(image_url, timeout=10)
+            if img_resp.status_code == 200:
+                upload = client.upload_blob(img_resp.content)
+                image_blob = upload.blob
+
+        # --- embed生成 ---
         embed = models.AppBskyEmbedExternal.Main(
             external=models.AppBskyEmbedExternal.External(
                 uri=url,
                 title=card.get("title", ""),
                 description=card.get("description", ""),
-                thumb=None
+                thumb=image_blob
             )
         )
 
         client.send_post(text=text, embed=embed)
 
-    except Exception:
-        # embed失敗時はフォールバック
+    except Exception as e:
+        logging.warning(f"Embed failed: {e}")
         client.send_post(text=text)
 
 
