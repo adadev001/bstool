@@ -195,9 +195,15 @@ def post_bluesky(identifier, password, text, url):
         image_url = card.get("image")
         if image_url:
             img_resp = requests.get(image_url, timeout=10)
+
             if img_resp.status_code == 200:
-                upload = client.upload_blob(img_resp.content)
-                image_blob = upload.blob
+
+                # 1MB以上はアップロードしない
+                if len(img_resp.content) < 1_000_000:
+                    upload = client.upload_blob(img_resp.content)
+                    image_blob = upload.blob
+                else:
+                    logging.info("Image too large, skipping thumbnail")
 
         # --- embed生成 ---
         embed = models.AppBskyEmbedExternal.Main(
@@ -214,7 +220,6 @@ def post_bluesky(identifier, password, text, url):
     except Exception as e:
         logging.warning(f"Embed failed: {e}")
         client.send_post(text=text)
-
 
 
 # ==========================
