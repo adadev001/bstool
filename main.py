@@ -5,7 +5,7 @@ import yaml
 import feedparser
 import logging
 from google import genai
-from atproto import Client
+from atproto import Client, models
 
 # ==========================
 # 定数
@@ -175,10 +175,34 @@ def fetch_nvd(site):
 # Bluesky投稿
 # ==========================
 
-def post_bluesky(identifier, password, text):
+def post_bluesky(identifier, password, text, url):
     client = Client()
     client.login(identifier, password)
-    client.send_post(text)
+
+    # リンクカード生成
+    try:
+        resp = requests.get(
+            "https://cardyb.bsky.app/v1/extract",
+            params={"url": url},
+            timeout=10
+        )
+        card = resp.json()
+
+        embed = models.AppBskyEmbedExternal.Main(
+            external=models.AppBskyEmbedExternal.External(
+                uri=url,
+                title=card.get("title", ""),
+                description=card.get("description", ""),
+                thumb=None
+            )
+        )
+
+        client.send_post(text=text, embed=embed)
+
+    except Exception:
+        # embed失敗時はフォールバック
+        client.send_post(text=text)
+
 
 
 # ==========================
