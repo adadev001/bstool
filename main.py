@@ -273,6 +273,7 @@ def main():
     # ★ 1件だけ実データ投稿テスト
     # ==========================
     TEST_SINGLE_POST = True
+    TEST_SITE_KEY = "nvd"   # ← ここを変更するだけで切替
 
     if TEST_SINGLE_POST:
         logging.info("Test single real item")
@@ -280,35 +281,38 @@ def main():
         config = load_config()
         sites = config.get("sites", {})
 
-        for site_key, site in sites.items():
-            if not site.get("enabled", True):
-                continue
+        if TEST_SITE_KEY not in sites:
+            raise ValueError(f"{TEST_SITE_KEY} not found in sites.yaml")
 
-            if site["type"] == "rss":
-                items = fetch_rss(site)
-            elif site["type"] == "nvd_api":
-                items = fetch_nvd(site)
-            else:
-                continue
+        site = sites[TEST_SITE_KEY]
 
-            if not items:
-                continue
+        if not site.get("enabled", True):
+            raise ValueError(f"{TEST_SITE_KEY} is disabled")
 
-            item = items[0]
+        if site["type"] == "rss":
+            items = fetch_rss(site)
+        elif site["type"] == "nvd_api":
+            items = fetch_nvd(site)
+        else:
+            raise ValueError("Unknown site type")
 
-            summary = summarize(item["text"], gemini_key)
-            post_text = format_post(site, summary, item["url"], item)
+        if not items:
+            logging.info("No items found")
+            return
 
-            post_bluesky(
-                bluesky_id,
-                bluesky_pw,
-                post_text,
-                item["url"]
-            )
+        item = items[0]
 
-            logging.info("Posted successfully")
+        summary = summarize(item["text"], gemini_key)
+        post_text = format_post(site, summary, item["url"], item)
 
-            break  # 1サイトだけ投稿して終了
+        post_bluesky(
+            bluesky_id,
+            bluesky_pw,
+            post_text,
+            item["url"]
+        )
+
+        logging.info("Posted successfully")
 
         return
 
