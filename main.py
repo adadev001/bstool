@@ -364,7 +364,11 @@ def main():
                 logging.info(f"Skip duplicate CVE (JVN): {cve_id}")
                 continue
 
-            summary = summarize(item["text"], gemini_key)
+            if force_test:
+                summary = item["text"][:200]  # テスト中はそのまま
+            else:
+                summary = summarize(item["text"], gemini_key)
+
             post_text = format_post(site, summary, item["url"], item)
 
             if force_test:
