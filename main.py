@@ -4,6 +4,7 @@ import requests
 import yaml
 import feedparser
 import logging
+import time
 from google import genai
 from atproto import Client, models
 
@@ -56,12 +57,12 @@ def format_post(site, summary, url, item):
     else:
         base_text = body
 
-    allowed = MAX_POST_LENGTH - len(url) - 1
+    allowed = MAX_POST_LENGTH
 
     if len(base_text) > allowed:
         base_text = base_text[:allowed - 1] + "…"
 
-    return f"{base_text}\n{url}"
+    return base_text
 
 
 
@@ -210,17 +211,41 @@ def post_bluesky(identifier, password, text, url):
 # ==========================
 
 def main():
-    config = load_config()
-    settings = config.get("settings", {})
-    sites = config.get("sites", {})
 
-    logging.basicConfig(level=getattr(logging, settings.get("log_level", "INFO")))
-
-    state = load_state()
+    logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s"
+    )
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
     bluesky_id = os.environ.get("BLUESKY_IDENTIFIER")
     bluesky_pw = os.environ.get("BLUESKY_PASSWORD")
+
+    if not bluesky_id or not bluesky_pw:
+        raise ValueError("Bluesky credentials not set")
+
+    FORCE_TEST = True
+
+    if FORCE_TEST:
+        logging.info("Force test post")
+
+        test_url = "https://thehackernews.com/"
+        test_text = "Test embed post"
+
+        post_bluesky(
+            bluesky_id,
+            bluesky_pw,
+            test_text,
+            test_url
+        )
+        return
+
+
+    config = load_config()
+    settings = config.get("settings", {})
+    sites = config.get("sites", {})
+
+    state = load_state()
 
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
