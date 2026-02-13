@@ -261,8 +261,12 @@ def main():
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
 
+    # BlueskyのID、Passのデバッグ
     print("DEBUG ID:", bluesky_id)
     print("DEBUG PW length:", len(bluesky_pw) if bluesky_pw else None)
+    print("ID raw repr:", repr(identifier))
+    print("PW raw repr:", repr(bluesky_pw))
+
 
     client = Client()
     client.login(bluesky_id, bluesky_pw)
