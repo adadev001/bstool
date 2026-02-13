@@ -274,6 +274,8 @@ def main():
                 item["url"]
             )
 
+            logging.info("Posted successfully")
+
             break  # 1サイトだけ投稿して終了
 
         return
@@ -334,6 +336,8 @@ def main():
             logging.info("[TEST MODE] " + post_text)
         else:
             post_bluesky(bluesky_id, bluesky_pw, post_text, item["url"])
+            time.sleep(2)
+            logging.info("Posted successfully")
 
         state[site_key].append(item["id"])
 
