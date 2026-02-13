@@ -261,6 +261,9 @@ def main():
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
 
+    client = Client()
+    client.login(identifier, password)
+    
     config = load_config()
     settings = config.get("settings", {})
     force_test = settings.get("force_test_mode", False)
