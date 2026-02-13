@@ -305,6 +305,9 @@ def main():
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
+            print("DEBUG ID:", bluesky_id)
+            print("DEBUG PW length:", len(bluesky_pw) if bluesky_pw else None)
+
             post_bluesky(
                 client,
                 post_text,
