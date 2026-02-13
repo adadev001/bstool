@@ -163,11 +163,11 @@ def fetch_nvd(site):
 
         # --- CVSSバージョン対応 ---
         if "cvssMetricV31" in metrics:
-            score = float["cvssMetricV31"][0]["cvssData"]["baseScore"]
+            score = float(metrics["cvssMetricV31"][0]["cvssData"]["baseScore"])
         elif "cvssMetricV30" in metrics:
-            score = float["cvssMetricV30"][0]["cvssData"]["baseScore"]
+            score = float(metrics["cvssMetricV30"][0]["cvssData"]["baseScore"])
         elif "cvssMetricV2" in metrics:
-            score = float["cvssMetricV2"][0]["cvssData"]["baseScore"]
+            score = float(metrics["cvssMetricV2"][0]["cvssData"]["baseScore"])
 
         if score < threshold:
             continue
