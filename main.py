@@ -241,7 +241,7 @@ def main():
         item = new_items[0]
 
         summary = summarize(item["text"], gemini_key)
-        post_text = format_post(summary, item["url"])
+        post_text = format_post(site, summary, item["url"], item)
 
         if force_test:
             logging.info("[TEST MODE] " + post_text)
