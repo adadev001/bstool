@@ -40,6 +40,7 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+
 def cvss_to_severity(score):
     if score >= 9.0:
         return "CRITICAL"
@@ -50,13 +51,12 @@ def cvss_to_severity(score):
     else:
         return "LOW"
 
+
 def format_post(site, summary, url, item):
     body = summary.replace("\n", " ").strip()
 
     if site["type"] == "nvd_api":
         cve_id = item["id"]
-
-        # itemにscoreを直接持たせる方が安全
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
 
@@ -64,7 +64,6 @@ def format_post(site, summary, url, item):
         score_line = f"CVSS {score} | {severity}"
 
         base_text = f"{header}\n{score_line}\n\n{body}"
-
     else:
         base_text = body
 
@@ -72,6 +71,7 @@ def format_post(site, summary, url, item):
         base_text = base_text[:MAX_POST_LENGTH - 2] + "…"
 
     return base_text
+
 
 # ==========================
 # Gemini 要約
@@ -101,11 +101,11 @@ def summarize(text, api_key, max_retries=3):
             if result:
                 return result[:100]
 
-        except Exception as e:
+        except Exception:
             if attempt < max_retries - 1:
                 time.sleep(2)
             else:
-                raise e
+                raise
 
     return text[:100]
 
@@ -163,7 +163,6 @@ def fetch_nvd(site):
 
         score = 0
 
-        # --- CVSSバージョン対応 ---
         if "cvssMetricV31" in metrics:
             score = float(metrics["cvssMetricV31"][0]["cvssData"]["baseScore"])
         elif "cvssMetricV30" in metrics:
@@ -186,13 +185,12 @@ def fetch_nvd(site):
         detail_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
 
         items.append({
-             "id": cve_id,
-             "score": score,
-             "text": (
+            "id": cve_id,
+            "score": score,
+            "text": (
                 f"CVE ID: {cve_id}\n"
                 f"CVSS Score: {score}\n\n"
-                f"Description:\n"
-                f"{description}"
+                f"Description:\n{description}"
             ),
             "url": detail_url
         })
@@ -209,7 +207,6 @@ def post_bluesky(identifier, password, text, url):
     client.login(identifier, password)
 
     try:
-        # --- card情報取得 ---
         resp = requests.get(
             "https://cardyb.bsky.app/v1/extract",
             params={"url": url},
@@ -219,21 +216,16 @@ def post_bluesky(identifier, password, text, url):
 
         image_blob = None
 
-        # --- 画像がある場合 ---
         image_url = card.get("image")
         if image_url:
             img_resp = requests.get(image_url, timeout=10)
-
             if img_resp.status_code == 200:
-
-                # 1MB以上はアップロードしない
                 if len(img_resp.content) < 1_000_000:
                     upload = client.upload_blob(img_resp.content)
                     image_blob = upload.blob
                 else:
                     logging.info("Image too large, skipping thumbnail")
 
-        # --- embed生成 ---
         embed = models.AppBskyEmbedExternal.Main(
             external=models.AppBskyEmbedExternal.External(
                 uri=url,
@@ -253,6 +245,7 @@ def post_bluesky(identifier, password, text, url):
 # ==========================
 # メイン処理
 # ==========================
+
 def main():
 
     logging.basicConfig(
@@ -270,53 +263,56 @@ def main():
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
 
-    # ==========================
-    # ★ 1件だけ実データ投稿テスト
-    # ==========================
     TEST_SINGLE_POST = True
-    TEST_SITE_KEY = "nvd"   # ← ここを変更するだけで切替
 
+    # ==========================
+    # テストモード
+    # ==========================
     if TEST_SINGLE_POST:
-        logging.info("Test single real item")
+
+        logging.info("Test single real item (all enabled sites)")
 
         config = load_config()
         sites = config.get("sites", {})
 
-        if TEST_SITE_KEY not in sites:
-            raise ValueError(f"{TEST_SITE_KEY} not found in sites.yaml")
+        for site_key, site in sites.items():
 
-        site = sites[TEST_SITE_KEY]
+            if not site.get("enabled", True):
+                continue
 
-        if not site.get("enabled", True):
-            raise ValueError(f"{TEST_SITE_KEY} is disabled")
+            logging.info(f"Testing site: {site_key}")
 
-        if site["type"] == "rss":
-            items = fetch_rss(site)
-        elif site["type"] == "nvd_api":
-            items = fetch_nvd(site)
-        else:
-            raise ValueError("Unknown site type")
+            if site["type"] == "rss":
+                items = fetch_rss(site)
+            elif site["type"] == "nvd_api":
+                items = fetch_nvd(site)
+            else:
+                continue
 
-        if not items:
-            logging.info("No items found")
-            return
+            if not items:
+                logging.info("No items found")
+                continue
 
-        item = items[0]
+            item = items[0]
 
-        summary = summarize(item["text"], gemini_key)
-        post_text = format_post(site, summary, item["url"], item)
+            summary = summarize(item["text"], gemini_key)
+            post_text = format_post(site, summary, item["url"], item)
 
-        post_bluesky(
-            bluesky_id,
-            bluesky_pw,
-            post_text,
-            item["url"]
-        )
+            post_bluesky(
+                bluesky_id,
+                bluesky_pw,
+                post_text,
+                item["url"]
+            )
 
-        logging.info("Posted successfully")
+            logging.info("Posted successfully")
+            time.sleep(2)
 
         return
 
+    # ==========================
+    # 本番モード
+    # ==========================
 
     config = load_config()
     settings = config.get("settings", {})
@@ -324,8 +320,8 @@ def main():
 
     state = load_state()
 
-    if not gemini_key:
-        raise ValueError("GEMINI_API_KEY not set")
+    if "_posted_cves" not in state:
+        state["_posted_cves"] = []
 
     skip_first = settings.get("skip_existing_on_first_run", True)
     force_test = settings.get("force_test_mode", False)
@@ -348,7 +344,6 @@ def main():
             logging.warning(f"Unknown type: {site['type']}")
             continue
 
-        # 初回処理
         if not state[site_key] and skip_first:
             logging.info("Initial run → skip existing")
             state[site_key] = [item["id"] for item in items]
@@ -363,8 +358,13 @@ def main():
             logging.info("No new items")
             continue
 
-        # 新着を投稿
         for item in new_items:
+
+            cve_id = item.get("id")
+
+            if site_key == "jvn" and cve_id in state["_posted_cves"]:
+                logging.info(f"Skip duplicate CVE (JVN): {cve_id}")
+                continue
 
             summary = summarize(item["text"], gemini_key)
             post_text = format_post(site, summary, item["url"], item)
@@ -378,7 +378,11 @@ def main():
 
             state[site_key].append(item["id"])
 
+            if site_key == "nvd":
+                state["_posted_cves"].append(item["id"])
+
         save_state(state)
+
 
 if __name__ == "__main__":
     main()
