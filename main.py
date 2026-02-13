@@ -4,7 +4,7 @@ import requests
 import yaml
 import feedparser
 import logging
-import google.generativeai as genai
+from google import genai
 from atproto import Client
 
 # ==========================
@@ -53,8 +53,7 @@ def format_post(summary, url):
 # ==========================
 
 def summarize(text, api_key):
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-2.5-flash-lite")
+    client = genai.Client(api_key=api_key)
 
     prompt = f"""
 以下を日本語で簡潔に要約してください。
@@ -64,7 +63,12 @@ def summarize(text, api_key):
 
 {text}
 """
-    response = model.generate_content(prompt)
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash-lite",
+        contents=prompt
+    )
+
     return response.text.strip()
 
 
