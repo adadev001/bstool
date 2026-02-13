@@ -327,8 +327,8 @@ def main():
 
             sleep_seconds = random.randint(45, 120)
             time.sleep(sleep_seconds)
-　　　　　　
-　　　　　　#最初のサイト1件のみにするときは以下を有効に、無効だと全サイト
+
+            #最初のサイト1件のみにするときは以下を有効に、無効だと全サイト
             #return           # ← ★ ここが重要
 
         return
