@@ -270,7 +270,7 @@ def main():
         if force_test:
             logging.info("[TEST MODE] " + post_text)
         else:
-            post_bluesky(bluesky_id, bluesky_pw, post_text)
+            post_bluesky(bluesky_id, bluesky_pw, post_text, item["url"])
 
         state[site_key].append(item["id"])
 
