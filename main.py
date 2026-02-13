@@ -56,15 +56,8 @@ def format_post(site, summary, url, item):
     if site["type"] == "nvd_api":
         cve_id = item["id"]
 
-        # スコア抽出
-        score = 0
-        if "CVSS:" in item["text"]:
-            try:
-                score_part = item["text"].split("CVSS:")[1].split(")")[0]
-                score = float(score_part)
-            except:
-                score = 0
-
+        # itemにscoreを直接持たせる方が安全
+        score = item.get("score", 0)
         severity = cvss_to_severity(score)
 
         header = f"{cve_id}"
@@ -75,9 +68,8 @@ def format_post(site, summary, url, item):
     else:
         base_text = body
 
-    # 140文字制限
     if len(base_text) > MAX_POST_LENGTH:
-        base_text = base_text[:MAX_POST_LENGTH - 1] + "…"
+        base_text = base_text[:MAX_POST_LENGTH - 2] + "…"
 
     return base_text
 
@@ -155,6 +147,7 @@ def fetch_nvd(site):
     }
 
     response = requests.get(url, params=params)
+    response.raise_for_status()
     data = response.json()
 
     items = []
@@ -170,11 +163,11 @@ def fetch_nvd(site):
 
         # --- CVSSバージョン対応 ---
         if "cvssMetricV31" in metrics:
-            score = metrics["cvssMetricV31"][0]["cvssData"]["baseScore"]
+            score = float["cvssMetricV31"][0]["cvssData"]["baseScore"]
         elif "cvssMetricV30" in metrics:
-            score = metrics["cvssMetricV30"][0]["cvssData"]["baseScore"]
+            score = float["cvssMetricV30"][0]["cvssData"]["baseScore"]
         elif "cvssMetricV2" in metrics:
-            score = metrics["cvssMetricV2"][0]["cvssData"]["baseScore"]
+            score = float["cvssMetricV2"][0]["cvssData"]["baseScore"]
 
         if score < threshold:
             continue
@@ -191,8 +184,14 @@ def fetch_nvd(site):
         detail_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
 
         items.append({
-            "id": cve_id,
-            "text": f"{cve_id} (CVSS:{score})\n{description}",
+             "id": cve_id,
+             "score": score,
+             "text": (
+                f"CVE ID: {cve_id}\n"
+                f"CVSS Score: {score}\n\n"
+                f"Description:\n"
+                f"{description}"
+            ),
             "url": detail_url
         })
 
@@ -362,23 +361,22 @@ def main():
             logging.info("No new items")
             continue
 
-        # 1日1回想定 → 1件のみ
-        item = new_items[0]
+        # 新着を投稿
+        for item in new_items:
 
-        summary = summarize(item["text"], gemini_key)
-        post_text = format_post(site, summary, item["url"], item)
+            summary = summarize(item["text"], gemini_key)
+            post_text = format_post(site, summary, item["url"], item)
 
-        if force_test:
-            logging.info("[TEST MODE] " + post_text)
-        else:
-            post_bluesky(bluesky_id, bluesky_pw, post_text, item["url"])
-            time.sleep(2)
-            logging.info("Posted successfully")
+            if force_test:
+                logging.info("[TEST MODE] " + post_text)
+            else:
+                post_bluesky(bluesky_id, bluesky_pw, post_text, item["url"])
+                time.sleep(2)
+                logging.info("Posted successfully")
 
-        state[site_key].append(item["id"])
+            state[site_key].append(item["id"])
 
-    save_state(state)
-
+        save_state(state)
 
 if __name__ == "__main__":
     main()
