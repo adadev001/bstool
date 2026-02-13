@@ -88,13 +88,19 @@ def summarize(text, api_key, max_retries=3):
                 model="gemini-2.5-flash-lite",
                 contents=prompt
             )
-            return response.text.strip()
 
-        except Exception:
+            result = response.text.strip()
+
+            if result:
+                return result[:100]
+
+        except Exception as e:
             if attempt < max_retries - 1:
                 time.sleep(2)
             else:
-                return text[:100]
+                raise e
+
+    return text[:100]
 
 
 # ==========================
@@ -146,8 +152,14 @@ def fetch_nvd(site):
         metrics = cve.get("metrics", {})
 
         score = 0
+
+        # --- CVSSバージョン対応 ---
         if "cvssMetricV31" in metrics:
             score = metrics["cvssMetricV31"][0]["cvssData"]["baseScore"]
+        elif "cvssMetricV30" in metrics:
+            score = metrics["cvssMetricV30"][0]["cvssData"]["baseScore"]
+        elif "cvssMetricV2" in metrics:
+            score = metrics["cvssMetricV2"][0]["cvssData"]["baseScore"]
 
         if score < threshold:
             continue
@@ -161,12 +173,12 @@ def fetch_nvd(site):
         if not cve_id:
             continue
 
-        url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+        detail_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
 
         items.append({
             "id": cve_id,
             "text": f"{cve_id} (CVSS:{score})\n{description}",
-            "url": url
+            "url": detail_url
         })
 
     return items
