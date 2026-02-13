@@ -40,19 +40,36 @@ def save_state(state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
-def format_post(summary, url):
-    summary = summary.replace("\n", " ").strip()
+def format_post(site, summary, url, item):
+    body = summary.replace("\n", " ").strip()
+
+    if site["type"] == "nvd_api":
+        cve_id = item["id"]
+
+        header = cve_id
+
+        if "CVSS:" in item["text"]:
+            score_part = item["text"].split("CVSS:")[1].split(")")[0]
+            header += f" (CVSS:{score_part})"
+
+        base_text = f"{header}\n{body}"
+    else:
+        base_text = body
+
     allowed = MAX_POST_LENGTH - len(url) - 1
-    if len(summary) > allowed:
-        summary = summary[:allowed - 1] + "…"
-    return f"{summary} {url}"
+
+    if len(base_text) > allowed:
+        base_text = base_text[:allowed - 1] + "…"
+
+    return f"{base_text}\n{url}"
+
 
 
 # ==========================
 # Gemini 要約
 # ==========================
 
-def summarize(text, api_key):
+def summarize(text, api_key, max_retries=3):
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
@@ -64,12 +81,19 @@ def summarize(text, api_key):
 {text}
 """
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash-lite",
-        contents=prompt
-    )
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt
+            )
+            return response.text.strip()
 
-    return response.text.strip()
+        except Exception:
+            if attempt < max_retries - 1:
+                time.sleep(2)
+            else:
+                return text[:100]
 
 
 # ==========================
