@@ -261,6 +261,9 @@ def main():
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
 
+    print("DEBUG ID:", bluesky_id)
+    print("DEBUG PW length:", len(bluesky_pw) if bluesky_pw else None)
+
     client = Client()
     client.login(bluesky_id, bluesky_pw)
 
@@ -304,9 +307,6 @@ def main():
 
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
-
-            print("DEBUG ID:", bluesky_id)
-            print("DEBUG PW length:", len(bluesky_pw) if bluesky_pw else None)
 
             post_bluesky(
                 client,
