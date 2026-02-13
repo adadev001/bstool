@@ -144,7 +144,7 @@ def fetch_nvd(site):
 
     params = {
         "resultsPerPage": site.get("max_items", 100),
-        "sortBy": "publishDate",
+        "sortBy": "pubDate",
         "sortOrder": "desc"
     }
 
