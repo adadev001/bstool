@@ -264,7 +264,7 @@ def main():
     # BlueskyのID、Passのデバッグ
     print("DEBUG ID:", bluesky_id)
     print("DEBUG PW length:", len(bluesky_pw) if bluesky_pw else None)
-    print("ID raw repr:", repr(identifier))
+    print("ID raw repr:", repr(bluesky_id))
     print("PW raw repr:", repr(bluesky_pw))
 
 
