@@ -282,6 +282,8 @@ def main():
         return summarize(text, gemini_key)
 
     TEST_SINGLE_POST = True
+    DRY_RUN = True
+
 
     # ==========================
     # テストモード
@@ -312,11 +314,14 @@ def main():
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
-            post_bluesky(
-                client,
-                post_text,
-                item["url"]
-            )
+            if DRY_RUN:
+                logging.info("[DRY RUN] " + post_text)
+            else:
+                post_bluesky(
+                    client,
+                    post_text,
+                    item["url"]
+                )
 
             logging.info("Posted successfully")
 
