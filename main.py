@@ -40,6 +40,15 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+def cvss_to_severity(score):
+    if score >= 9.0:
+        return "CRITICAL"
+    elif score >= 7.0:
+        return "HIGH"
+    elif score >= 4.0:
+        return "MEDIUM"
+    else:
+        return "LOW"
 
 def format_post(site, summary, url, item):
     body = summary.replace("\n", " ").strip()
@@ -47,24 +56,30 @@ def format_post(site, summary, url, item):
     if site["type"] == "nvd_api":
         cve_id = item["id"]
 
-        header = cve_id
-
+        # スコア抽出
+        score = 0
         if "CVSS:" in item["text"]:
-            score_part = item["text"].split("CVSS:")[1].split(")")[0]
-            header += f" (CVSS:{score_part})"
+            try:
+                score_part = item["text"].split("CVSS:")[1].split(")")[0]
+                score = float(score_part)
+            except:
+                score = 0
 
-        base_text = f"{header}\n{body}"
+        severity = cvss_to_severity(score)
+
+        header = f"{cve_id}"
+        score_line = f"CVSS {score} | {severity}"
+
+        base_text = f"{header}\n{score_line}\n\n{body}"
+
     else:
         base_text = body
 
-    allowed = MAX_POST_LENGTH
-
-    if len(base_text) > allowed:
-        base_text = base_text[:allowed - 1] + "…"
+    # 140文字制限
+    if len(base_text) > MAX_POST_LENGTH:
+        base_text = base_text[:MAX_POST_LENGTH - 1] + "…"
 
     return base_text
-
-
 
 # ==========================
 # Gemini 要約
