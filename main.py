@@ -262,8 +262,8 @@ def main():
         raise ValueError("GEMINI_API_KEY not set")
 
     client = Client()
-    client.login(identifier, password)
-    
+    client.login(bluesky_id, bluesky_pw)
+
     config = load_config()
     settings = config.get("settings", {})
     force_test = settings.get("force_test_mode", False)
