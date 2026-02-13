@@ -5,6 +5,7 @@ import yaml
 import feedparser
 import logging
 import time
+import random
 from google import genai
 from atproto import Client, models
 
@@ -103,7 +104,8 @@ def summarize(text, api_key, max_retries=3):
 
         except Exception:
             if attempt < max_retries - 1:
-                time.sleep(2)
+                sleep_seconds = random.randint(30, 90)
+                time.sleep(sleep_seconds)
             else:
                 raise
 
@@ -200,10 +202,8 @@ def fetch_nvd(site):
 # Bluesky投稿
 # ==========================
 
-def post_bluesky(identifier, password, text, url):
-    client = Client()
-    client.login(identifier, password)
-
+def post_bluesky(client, text, url):
+    
     try:
         resp = requests.get(
             "https://cardyb.bsky.app/v1/extract",
@@ -260,6 +260,9 @@ def main():
 
     if not gemini_key:
         raise ValueError("GEMINI_API_KEY not set")
+    
+    client = Client()
+    client.login(bluesky_id, bluesky_pw)
 
     config = load_config()
     settings = config.get("settings", {})
@@ -295,7 +298,6 @@ def main():
                 continue
 
             if not items:
-                logging.info("No items found")
                 continue
 
             item = items[0]
@@ -304,14 +306,17 @@ def main():
             post_text = format_post(site, summary, item["url"], item)
 
             post_bluesky(
-                bluesky_id,
-                bluesky_pw,
+                client,
                 post_text,
                 item["url"]
             )
 
             logging.info("Posted successfully")
-            time.sleep(2)
+
+            sleep_seconds = random.randint(45, 120)
+            time.sleep(sleep_seconds)
+
+            return           # ← ★ ここが重要
 
         return
 
@@ -371,8 +376,9 @@ def main():
             if force_test:
                 logging.info("[TEST MODE] " + post_text)
             else:
-                post_bluesky(bluesky_id, bluesky_pw, post_text, item["url"])
-                time.sleep(2)
+                post_bluesky(client, post_text, item["url"])
+                sleep_seconds = random.randint(30, 90)
+                time.sleep(sleep_seconds)
                 logging.info("Posted successfully")
 
             state[site_key].append(item["id"])
