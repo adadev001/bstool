@@ -283,7 +283,11 @@ def main():
             return text[:200]
         return summarize(text, gemini_key)
 
-    MODE = "Prod"   # "test" or "prod"
+    MODE = settings.get("mode", "test").lower()
+
+    if MODE not in ("test", "prod"):
+    raise ValueError(f"Invalid MODE in site.yaml: {MODE}")
+
     logger.info("============================================")
     logger.info(f"Running MODE = {MODE}")
     logger.info("============================================")
