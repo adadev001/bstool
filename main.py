@@ -282,6 +282,9 @@ def main():
         return summarize(text, gemini_key)
 
     MODE = "Prod"   # "test" or "prod"
+    logger.info("============================================")
+    logger.info(f"Running MODE = {MODE}")
+    logger.info("============================================")
 
     # ==========================
     # テストモード
