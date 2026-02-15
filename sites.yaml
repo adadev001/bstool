@@ -6,7 +6,7 @@ settings:
   log_level: INFO
   force_test_mode: false
   # 初回実行時は既存記事を通知せず
-  skip_existing_on_first_run: false
+  skip_existing_on_first_run: true   # 初回事故防止
 
 
 # ============================================
@@ -22,7 +22,7 @@ sites:
     type: rss
     url: https://feeds.feedburner.com/TheHackersNews
     enabled: true
-    max_items: 1
+    max_items: 50   # ← 取得は複数OK（stateで制御）
 
   # ------------------------------------------
   # Security NEXT
