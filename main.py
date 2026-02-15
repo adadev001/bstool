@@ -281,7 +281,7 @@ def main():
             return text[:200]
         return summarize(text, gemini_key)
 
-    MODE = "Prod   # "test" or "prod"
+    MODE = "Prod"   # "test" or "prod"
 
     # ==========================
     # テストモード
