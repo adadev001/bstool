@@ -286,7 +286,7 @@ def main():
     MODE = settings.get("mode", "test").lower()
 
     if MODE not in ("test", "prod"):
-    raise ValueError(f"Invalid MODE in site.yaml: {MODE}")
+        raise ValueError(f"Invalid MODE in site.yaml: {MODE}")
 
     logger.info("============================================")
     logger.info(f"Running MODE = {MODE}")
