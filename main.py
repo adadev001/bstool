@@ -251,6 +251,8 @@ def main():
         format="%(levelname)s:%(name)s:%(message)s"
     )
 
+    logger = logging.getLogger(__name__)
+
     gemini_key = os.environ.get("GEMINI_API_KEY")
     bluesky_id = os.environ.get("BLUESKY_IDENTIFIER")
     bluesky_pw = os.environ.get("BLUESKY_PASSWORD")
