@@ -281,14 +281,12 @@ def main():
             return text[:200]
         return summarize(text, gemini_key)
 
-    TEST_SINGLE_POST = True
-    DRY_RUN = True
-
+    MODE = "test"   # "test" or "prod"
 
     # ==========================
     # テストモード
     # ==========================
-    if TEST_SINGLE_POST:
+    if MODE == "test":
 
         logging.info("Test single real item (all enabled sites)")
 
@@ -314,16 +312,9 @@ def main():
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
-            if DRY_RUN:
-                logging.info("[DRY RUN] " + post_text)
-            else:
-                post_bluesky(
-                    client,
-                    post_text,
-                    item["url"]
-                )
+            logging.info("[TEST] " + post_text)
 
-            logging.info("Posted successfully")
+            logging.info("Test completed")
 
             sleep_seconds = random.randint(45, 120)
             time.sleep(sleep_seconds)
@@ -386,13 +377,10 @@ def main():
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
-            if force_test:
-                logging.info("[TEST MODE] " + post_text)
-            else:
-                post_bluesky(client, post_text, item["url"])
-                sleep_seconds = random.randint(30, 90)
-                time.sleep(sleep_seconds)
-                logging.info("Posted successfully")
+            post_bluesky(client, post_text, item["url"])
+            sleep_seconds = random.randint(30, 90)
+            time.sleep(sleep_seconds)
+            logging.info("Posted successfully")
 
             state[site_key].append(item["id"])
 
