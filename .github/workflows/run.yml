@@ -2,7 +2,7 @@ name: News to Bluesky Bot
 
 on: 
   schedule: 
-  - cron: "0 21 * * *" # 毎日 21:00 UTC（= JST 6:00）
+  - cron: "0 21 * * *" # 毎日 21:00 UTC に実行 （= JST 6:00）
   workflow_dispatch:
 
 jobs:
