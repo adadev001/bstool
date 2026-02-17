@@ -1,0 +1,63 @@
+# ============================================
+# 全体設定
+# ============================================
+settings:
+  mode: prod  # tost / prod
+  log_level: INFO
+  force_test_mode: false
+  # 初回実行時は既存記事を通知せず
+  skip_existing_on_first_run: true   # 初回事故防止
+
+
+# ============================================
+# サイト定義
+# ============================================
+sites:
+
+  # ------------------------------------------
+  # The Hacker News
+  # ------------------------------------------
+  thehackernews:
+    display_name: The Hacker News
+    type: rss
+    url: https://feeds.feedburner.com/TheHackersNews
+    enabled: true
+    max_items: 5   # ← 取得は複数OK（stateで制御）
+
+  # ------------------------------------------
+  # Security NEXT
+  # ------------------------------------------
+  securitynext:
+    display_name: Security NEXT
+    type: rss
+    url: https://www.security-next.com/feed
+    enabled: false
+    max_items: 50
+
+  # ------------------------------------------
+  # NVD (National Vulnerability Database)
+  # ------------------------------------------
+  nvd:
+    display_name: NVD
+    type: nvd_api
+    enabled: true
+    cvss_threshold: 7.0
+    max_items: 5
+
+  # ------------------------------------------
+  # jvn
+  # ------------------------------------------
+  jvn:
+    enabled: false
+    type: rss
+    url: "https://jvn.jp/rss/jvn.rdf"
+    max_items: 50
+
+  # ------------------------------------------
+  # NetSecurity
+  # ------------------------------------------
+  netsecurity:
+    enabled: false
+    type: rss
+    url: "https://netsecurity.ne.jp/rss/index.rdf"
+    max_items: 50
