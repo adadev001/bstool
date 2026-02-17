@@ -22,7 +22,7 @@ sites:
     type: rss
     url: https://feeds.feedburner.com/TheHackersNews
     enabled: true
-    max_items: 10   # ← 取得は複数OK（stateで制御）
+    max_items: 5   # ← 取得は複数OK（stateで制御）
 
   # ------------------------------------------
   # Security NEXT
@@ -42,7 +42,7 @@ sites:
     type: nvd_api
     enabled: true
     cvss_threshold: 7.0
-    max_items: 1
+    max_items: 5
 
   # ------------------------------------------
   # jvn
