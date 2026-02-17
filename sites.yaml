@@ -40,9 +40,9 @@ sites:
   nvd:
     display_name: NVD
     type: nvd_api
-    enabled: false
+    enabled: true
     cvss_threshold: 7.0
-    max_items: 100
+    max_items: 1
 
   # ------------------------------------------
   # jvn
