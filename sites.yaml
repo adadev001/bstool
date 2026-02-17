@@ -23,9 +23,7 @@ sites:
     url: https://feeds.feedburner.com/TheHackersNews
     enabled: true
     # 初回と2回目以降で取得件数を分ける
-    max_items:    # ← 取得は複数OK（stateで制御）
-      first_run: 5  # 初回実行時の最大取得数
-      normal: 1     # 2回目移行の最大取得数
+    max_items:5    # ← 取得は複数OK（stateで制御）
 
   # ------------------------------------------
   # Security NEXT
@@ -35,9 +33,7 @@ sites:
     type: rss
     url: https://www.security-next.com/feed
     enabled: false
-    max_items:
-      first_run: 5
-      normal: 1
+    max_items:5    # ← 取得は複数OK（stateで制御）
 
 
   # ------------------------------------------
@@ -58,9 +54,7 @@ sites:
     enabled: false
     type: rss
     url: "https://jvn.jp/rss/jvn.rdf"
-    max_items:
-      first_run: 5
-      normal: 1
+    max_items:5    # ← 取得は複数OK（stateで制御）
 
 
   # ------------------------------------------
@@ -70,4 +64,4 @@ sites:
     enabled: false
     type: rss
     url: "https://netsecurity.ne.jp/rss/index.rdf"
-    max_items: 50
+    max_items:5    # ← 取得は複数OK（stateで制御）
