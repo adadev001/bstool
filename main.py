@@ -178,16 +178,38 @@ def summarize(text, api_key, max_retries=3):
 
     return result[:MAX_SUMMARY_LENGTH]
 
+# ==========================
+# max_items 解決ヘルパー
+# ==========================
+
+def resolve_max_items(site, state_for_site):
+    max_items = site.get("max_items", 1)
+
+    # 旧形式（数値）にも対応
+    if isinstance(max_items, int):
+        return max_items
+
+    # 初回判定：state が空
+    is_first_run = not state_for_site
+
+    if is_first_run:
+        return max_items.get("first_run", max_items.get("normal", 1))
+
+    return max_items.get("normal", 1)
+
 
 # ==========================
 # RSS取得
 # ==========================
 
-def fetch_rss(site):
+def fetch_rss(site, state_for_site):
     feed = feedparser.parse(site["url"])
     items = []
 
-    for entry in feed.entries[:site.get("max_items", 50)]:
+    # ★ ここで max_items を確定
+    max_items = resolve_max_items(site, state_for_site)
+
+    for entry in feed.entries[:max_items]:
         link = entry.get("link")
         title = entry.get("title", "")
         summary = entry.get("summary", "")
@@ -208,11 +230,13 @@ def fetch_rss(site):
 # NVD API取得
 # ==========================
 
-def fetch_nvd(site):
+def fetch_nvd(site, state_for_site):
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
+    max_items = resolve_max_items(site, state_for_site)
+    
     params = {
-        "resultsPerPage": site.get("max_items", 100)
+        "resultsPerPage": max_items
     }
 
     response = requests.get(url, params=params)
@@ -345,6 +369,8 @@ def main():
     force_test = settings.get("force_test_mode", False)
     sites = config.get("sites", {})
 
+    state = load_state()  # ★ テスト／本番 共通
+
     def get_summary(text):
 
         # flash-lite 前提の本文最適化を必ず通す
@@ -373,15 +399,21 @@ def main():
 
         for site_key, site in sites.items():
 
+            print("==== DEBUG ====")
+            print("site_key:", site_key)
+            print("site:", site)
+            print("type(site):", type(site))
+            print("================")
+
             if not site.get("enabled", True):
                 continue
 
             logging.info(f"Testing site: {site_key}")
 
             if site["type"] == "rss":
-                items = fetch_rss(site)
+                items = fetch_rss(site, state.get(site_key, []))
             elif site["type"] == "nvd_api":
-                items = fetch_nvd(site)
+                items = fetch_nvd(site, state.get(site_key, []))
             else:
                 continue
 
@@ -408,7 +440,6 @@ def main():
     # ==========================
     # 本番モード
     # ==========================
-    state = load_state()
 
     if "_posted_cves" not in state:
         state["_posted_cves"] = []
@@ -426,9 +457,9 @@ def main():
         logging.info(f"Processing: {site_key}")
 
         if site["type"] == "rss":
-            items = fetch_rss(site)
+            items = fetch_rss(site, state[site_key])
         elif site["type"] == "nvd_api":
-            items = fetch_nvd(site)
+            items = fetch_nvd(site, state[site_key])
         else:
             logging.warning(f"Unknown type: {site['type']}")
             continue
