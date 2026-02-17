@@ -22,7 +22,7 @@ sites:
     type: rss
     url: https://feeds.feedburner.com/TheHackersNews
     enabled: true
-    max_items: 50   # ← 取得は複数OK（stateで制御）
+    max_items: 10   # ← 取得は複数OK（stateで制御）
 
   # ------------------------------------------
   # Security NEXT
