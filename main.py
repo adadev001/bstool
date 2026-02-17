@@ -75,17 +75,83 @@ def format_post(site, summary, url, item):
 
 
 # ==========================
+# 本文処理の最適カット（flash-lite 前提）
+# ==========================
+
+def body_trim(text, max_length=2500):
+    """
+    Gemini flash-lite 向けに本文を最適化する前処理。
+
+    目的:
+    - 要約品質が急落する「入力過多」を防ぐ
+    - 記事構造を保ったまま、要約に必要な部分だけ渡す
+
+    ルール:
+    - 見出し
+    - リード文
+    - 本文冒頭 1〜2 段落
+    - 全体で最大 2,000〜2,500 文字（超えたら truncate）
+    """
+
+    if not text:
+        return ""
+
+    # 改行を正規化
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    # 段落単位で分割（空行区切り）
+    paragraphs = [
+        p.strip()
+        for p in normalized.split("\n\n")
+        if p.strip()
+    ]
+
+    picked = []
+
+    # ① 見出し（最初の行）
+    # RSS / NVD どちらも先頭にタイトルが来る前提
+    if paragraphs:
+        picked.append(paragraphs[0])
+
+    # ② リード文 + 本文冒頭 1〜2 段落
+    # 情報密度が高いのは最初の数段落のみ
+    for p in paragraphs[1:]:
+        # 明らかなノイズ段落を除外
+        if len(p) < 40:
+            continue
+        if p.startswith(("※", "関連記事", "参考", "免責")):
+            continue
+
+        picked.append(p)
+
+        # 見出し + 2 段落で十分
+        if len(picked) >= 3:
+            break
+
+    trimmed = "\n\n".join(picked)
+
+    # ③ 最終安全弁：文字数で truncate
+    if len(trimmed) > max_length:
+        trimmed = trimmed[:max_length]
+
+    return trimmed
+
+
+# ==========================
 # Gemini 要約
 # ==========================
 
 def summarize(text, api_key, max_retries=3):
     client = genai.Client(api_key=api_key)
+    MAX_SUMMARY_LENGTH = 100
 
     prompt = f"""
-以下を日本語で簡潔に要約してください。
-事実のみ。
-誇張なし。
-100文字以内。
+以下の記事を要約してください。
+条件:
+・日本語
+・80〜100文字
+・事実のみ
+・主語と固有名詞を省略しない
 
 {text}
 """
@@ -100,7 +166,8 @@ def summarize(text, api_key, max_retries=3):
             result = response.text.strip()
 
             if result:
-                return result[:100]
+                return result[:MAX_SUMMARY_LENGTH]
+
 
         except Exception:
             if attempt < max_retries - 1:
@@ -109,7 +176,7 @@ def summarize(text, api_key, max_retries=3):
             else:
                 raise
 
-    return text[:100]
+    return result[:MAX_SUMMARY_LENGTH]
 
 
 # ==========================
@@ -279,9 +346,14 @@ def main():
     sites = config.get("sites", {})
 
     def get_summary(text):
+
+        # flash-lite 前提の本文最適化を必ず通す
+        trimmed_text = body_trim(text)
+
         if force_test:
-            return text[:200]
-        return summarize(text, gemini_key)
+            # テスト時も「整形後本文」を使う（挙動差分防止）
+            return trimmed_text[:200]
+        return summarize(trimmed_text, gemini_key)
 
     MODE = settings.get("mode", "test").lower()
 
