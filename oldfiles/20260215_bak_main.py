@@ -18,16 +18,23 @@ SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 MAX_POST_LENGTH = 140
 
-# ★ JST対応
-JST = timezone(timedelta(hours=9))
+JST = timezone(timedelta(hours=9))  # --- JST LOG ADDITION ---
 
-def format_utc_with_jst(dt: datetime) -> str:
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    utc_str = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    jst_str = dt.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
-    return f"{utc_str}（JST：{jst_str}）"
+# ==========================
+# JST対応ログ用ユーティリティ
+# ==========================
 
+def utc_jst_str(ts: float | None = None) -> str:
+    """
+    UTC を基準にし、ログ表示のみ JST を併記する
+    """
+    if ts is None:
+        dt_utc = datetime.now(timezone.utc)
+    else:
+        dt_utc = datetime.fromtimestamp(ts, timezone.utc)
+
+    dt_jst = dt_utc.astimezone(JST)
+    return f"{dt_utc.isoformat()} (JST: {dt_jst.isoformat()})"
 
 # ==========================
 # 設定読み込み
@@ -50,11 +57,6 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-
-# ==========================
-# 補助
-# ==========================
-
 def cvss_to_severity(score):
     if score >= 9.0:
         return "CRITICAL"
@@ -65,7 +67,6 @@ def cvss_to_severity(score):
     else:
         return "LOW"
 
-
 def format_post(site, summary, url, item):
     body = summary.replace("\n", " ").strip()
 
@@ -73,7 +74,10 @@ def format_post(site, summary, url, item):
         cve_id = item["id"]
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-        base_text = f"{cve_id}\nCVSS {score} | {severity}\n\n{body}"
+
+        header = f"{cve_id}"
+        score_line = f"CVSS {score} | {severity}"
+        base_text = f"{header}\n{score_line}\n\n{body}"
     else:
         base_text = body
 
@@ -81,7 +85,6 @@ def format_post(site, summary, url, item):
         base_text = base_text[:MAX_POST_LENGTH - 2] + "…"
 
     return base_text
-
 
 # ==========================
 # Gemini 要約
@@ -105,8 +108,11 @@ def summarize(text, api_key, max_retries=3):
                 model="gemini-2.5-flash-lite",
                 contents=prompt
             )
-            if response.text:
-                return response.text.strip()[:100]
+
+            result = response.text.strip()
+            if result:
+                return result[:100]
+
         except Exception:
             if attempt < max_retries - 1:
                 time.sleep(random.randint(30, 90))
@@ -115,141 +121,117 @@ def summarize(text, api_key, max_retries=3):
 
     return text[:100]
 
-
 # ==========================
 # RSS取得
 # ==========================
 
 def fetch_rss(site):
+    logging.debug(f"[fetch_rss] start at {utc_jst_str()}")  # --- JST LOG ADDITION ---
     feed = feedparser.parse(site["url"])
     items = []
-    now_utc = datetime.now(timezone.utc)
 
     for entry in feed.entries[:site.get("max_items", 50)]:
         link = entry.get("link")
+        title = entry.get("title", "")
+        summary = entry.get("summary", "")
+
         if not link:
             continue
 
-        published_at = None
-        if entry.get("published_parsed"):
-            published_at = datetime.fromtimestamp(
-                time.mktime(entry.published_parsed),
-                tz=timezone.utc
-            )
-
         items.append({
             "id": link,
-            "text": f"{entry.get('title', '')}\n{entry.get('summary', '')}",
-            "url": link,
-            "published_at": published_at,
-            "fetched_at": now_utc
+            "text": f"{title}\n{summary}",
+            "url": link
         })
 
+    logging.debug(f"[fetch_rss] fetched={len(items)} at {utc_jst_str()}")  # --- JST LOG ADDITION ---
     return items
-
 
 # ==========================
 # NVD API取得
 # ==========================
 
 def fetch_nvd(site):
+    logging.debug(f"[fetch_nvd] start at {utc_jst_str()}")  # --- JST LOG ADDITION ---
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
     params = {"resultsPerPage": site.get("max_items", 100)}
+
     response = requests.get(url, params=params)
     response.raise_for_status()
     data = response.json()
 
     items = []
-    now_utc = datetime.now(timezone.utc)
     threshold = float(site.get("cvss_threshold", 0))
 
     for vuln in data.get("vulnerabilities", []):
         cve = vuln.get("cve", {})
         cve_id = cve.get("id")
-        if not cve_id:
-            continue
-
-        published_raw = cve.get("published")
-        published_at = (
-            datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
-            if published_raw else None
-        )
+        descriptions = cve.get("descriptions", [])
+        metrics = cve.get("metrics", {})
 
         score = 0
-        metrics = cve.get("metrics", {})
-        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
-            if key in metrics:
-                score = float(metrics[key][0]["cvssData"]["baseScore"])
-                break
+        if "cvssMetricV31" in metrics:
+            score = float(metrics["cvssMetricV31"][0]["cvssData"]["baseScore"])
+        elif "cvssMetricV30" in metrics:
+            score = float(metrics["cvssMetricV30"][0]["cvssData"]["baseScore"])
+        elif "cvssMetricV2" in metrics:
+            score = float(metrics["cvssMetricV2"][0]["cvssData"]["baseScore"])
 
         if score < threshold:
             continue
 
-        desc = next(
-            (d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"),
-            ""
-        )
+        description = ""
+        for d in descriptions:
+            if d.get("lang") == "en":
+                description = d.get("value")
+                break
+
+        if not cve_id:
+            continue
 
         items.append({
             "id": cve_id,
             "score": score,
-            "text": f"{cve_id}\nCVSS {score}\n\n{desc}",
-            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-            "published_at": published_at,
-            "fetched_at": now_utc
+            "text": description,
+            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}"
         })
 
+    logging.debug(f"[fetch_nvd] fetched={len(items)} at {utc_jst_str()}")  # --- JST LOG ADDITION ---
     return items
-
 
 # ==========================
 # Bluesky投稿
 # ==========================
 
 def post_bluesky(client, text, url):
+    logging.info(f"[post] start at {utc_jst_str()}")  # --- JST LOG ADDITION ---
     try:
-        resp = requests.get(
-            "https://cardyb.bsky.app/v1/extract",
-            params={"url": url},
-            timeout=10
-        )
-        card = resp.json()
-        image_blob = None
-
-        if card.get("image"):
-            img = requests.get(card["image"], timeout=10)
-            if img.status_code == 200 and len(img.content) < 1_000_000:
-                image_blob = client.upload_blob(img.content).blob
-
-        embed = models.AppBskyEmbedExternal.Main(
-            external=models.AppBskyEmbedExternal.External(
-                uri=url,
-                title=card.get("title", ""),
-                description=card.get("description", ""),
-                thumb=image_blob
-            )
-        )
-        client.send_post(text=text, embed=embed)
-
-    except Exception as e:
-        logging.warning(f"Embed failed: {e}")
         client.send_post(text=text)
-
+        logging.info(f"[post] completed at {utc_jst_str()}")  # --- JST LOG ADDITION ---
+    except Exception as e:
+        logging.error(f"[post] failed at {utc_jst_str()} error={e}")  # --- JST LOG ADDITION ---
+        raise
 
 # ==========================
 # メイン処理
 # ==========================
 
 def main():
-
     logging.basicConfig(
-        level=logging.DEBUG,  # ★ DEBUGまでJST併記
+        level=logging.DEBUG,
         format="%(levelname)s:%(message)s"
     )
+
+    logging.info(f"Program start at {utc_jst_str()}")  # --- JST LOG ADDITION ---
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
     bluesky_id = os.environ.get("BLUESKY_IDENTIFIER")
     bluesky_pw = os.environ.get("BLUESKY_PASSWORD")
+
+    if not bluesky_id or not bluesky_pw:
+        raise ValueError("Bluesky credentials not set")
+    if not gemini_key:
+        raise ValueError("GEMINI_API_KEY not set")
 
     client = Client(base_url="https://bsky.social")
     client.login(bluesky_id, bluesky_pw)
@@ -266,44 +248,40 @@ def main():
     if "_posted_cves" not in state:
         state["_posted_cves"] = []
 
-    for site_key, site in sites.items():
+    skip_first = settings.get("skip_existing_on_first_run", True)
 
+    for site_key, site in sites.items():
         if not site.get("enabled", True):
             continue
 
-        logging.info(f"Processing: {site_key}")
+        if site_key not in state:
+            state[site_key] = []
 
-        items = (
-            fetch_rss(site) if site["type"] == "rss"
-            else fetch_nvd(site) if site["type"] == "nvd_api"
-            else []
-        )
+        logging.info(f"[site] {site_key} start at {utc_jst_str()}")  # --- JST LOG ADDITION ---
 
-        for item in items:
+        if site["type"] == "rss":
+            items = fetch_rss(site)
+        elif site["type"] == "nvd_api":
+            items = fetch_nvd(site)
+        else:
+            continue
 
-            if item.get("published_at"):
-                logging.debug(
-                    f"published_at = {format_utc_with_jst(item['published_at'])}"
-                )
+        if not state[site_key] and skip_first:
+            logging.info("Initial run → skip existing")
+            state[site_key] = [item["id"] for item in items]
+            continue
 
-            logging.debug(
-                f"fetched_at   = {format_utc_with_jst(item['fetched_at'])}"
-            )
+        new_items = [item for item in items if item["id"] not in state[site_key]]
 
+        for item in new_items:
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
-
             post_bluesky(client, post_text, item["url"])
-            posted_at = datetime.now(timezone.utc)
 
-            logging.info(
-                f"posted_at    = {format_utc_with_jst(posted_at)}"
-            )
+            state[site_key].append(item["id"])
+            save_state(state)
 
-            time.sleep(random.randint(30, 90))
-
-    save_state(state)
-
+    logging.info(f"Program end at {utc_jst_str()}")  # --- JST LOG ADDITION ---
 
 if __name__ == "__main__":
     main()
