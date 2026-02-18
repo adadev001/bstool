@@ -6,6 +6,7 @@ import feedparser
 import logging
 import time
 import random
+from datetime import datetime, timezone, timedelta
 from google import genai
 from atproto import Client, models
 
@@ -17,6 +18,16 @@ SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 MAX_POST_LENGTH = 140
 
+# ★ JST対応
+JST = timezone(timedelta(hours=9))
+
+def format_utc_with_jst(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    utc_str = dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    jst_str = dt.astimezone(JST).strftime("%Y-%m-%d %H:%M:%S")
+    return f"{utc_str}（JST：{jst_str}）"
+
 
 # ==========================
 # 設定読み込み
@@ -25,7 +36,6 @@ MAX_POST_LENGTH = 140
 def load_config():
     with open(SITES_FILE, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
-
 
 def load_state():
     if not os.path.exists(STATE_FILE):
@@ -36,11 +46,14 @@ def load_state():
         except:
             return {}
 
-
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
+
+# ==========================
+# 補助
+# ==========================
 
 def cvss_to_severity(score):
     if score >= 9.0:
@@ -60,11 +73,7 @@ def format_post(site, summary, url, item):
         cve_id = item["id"]
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-
-        header = f"{cve_id}"
-        score_line = f"CVSS {score} | {severity}"
-
-        base_text = f"{header}\n{score_line}\n\n{body}"
+        base_text = f"{cve_id}\nCVSS {score} | {severity}\n\n{body}"
     else:
         base_text = body
 
@@ -96,16 +105,11 @@ def summarize(text, api_key, max_retries=3):
                 model="gemini-2.5-flash-lite",
                 contents=prompt
             )
-
-            result = response.text.strip()
-
-            if result:
-                return result[:100]
-
+            if response.text:
+                return response.text.strip()[:100]
         except Exception:
             if attempt < max_retries - 1:
-                sleep_seconds = random.randint(30, 90)
-                time.sleep(sleep_seconds)
+                time.sleep(random.randint(30, 90))
             else:
                 raise
 
@@ -119,19 +123,26 @@ def summarize(text, api_key, max_retries=3):
 def fetch_rss(site):
     feed = feedparser.parse(site["url"])
     items = []
+    now_utc = datetime.now(timezone.utc)
 
     for entry in feed.entries[:site.get("max_items", 50)]:
         link = entry.get("link")
-        title = entry.get("title", "")
-        summary = entry.get("summary", "")
-
         if not link:
             continue
 
+        published_at = None
+        if entry.get("published_parsed"):
+            published_at = datetime.fromtimestamp(
+                time.mktime(entry.published_parsed),
+                tz=timezone.utc
+            )
+
         items.append({
             "id": link,
-            "text": f"{title}\n{summary}",
-            "url": link
+            "text": f"{entry.get('title', '')}\n{entry.get('summary', '')}",
+            "url": link,
+            "published_at": published_at,
+            "fetched_at": now_utc
         })
 
     return items
@@ -143,56 +154,49 @@ def fetch_rss(site):
 
 def fetch_nvd(site):
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-
-    params = {
-        "resultsPerPage": site.get("max_items", 100)
-    }
-
+    params = {"resultsPerPage": site.get("max_items", 100)}
     response = requests.get(url, params=params)
     response.raise_for_status()
     data = response.json()
 
     items = []
+    now_utc = datetime.now(timezone.utc)
     threshold = float(site.get("cvss_threshold", 0))
 
     for vuln in data.get("vulnerabilities", []):
         cve = vuln.get("cve", {})
         cve_id = cve.get("id")
-        descriptions = cve.get("descriptions", [])
-        metrics = cve.get("metrics", {})
+        if not cve_id:
+            continue
+
+        published_raw = cve.get("published")
+        published_at = (
+            datetime.fromisoformat(published_raw.replace("Z", "+00:00"))
+            if published_raw else None
+        )
 
         score = 0
-
-        if "cvssMetricV31" in metrics:
-            score = float(metrics["cvssMetricV31"][0]["cvssData"]["baseScore"])
-        elif "cvssMetricV30" in metrics:
-            score = float(metrics["cvssMetricV30"][0]["cvssData"]["baseScore"])
-        elif "cvssMetricV2" in metrics:
-            score = float(metrics["cvssMetricV2"][0]["cvssData"]["baseScore"])
+        metrics = cve.get("metrics", {})
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if key in metrics:
+                score = float(metrics[key][0]["cvssData"]["baseScore"])
+                break
 
         if score < threshold:
             continue
 
-        description = ""
-        for d in descriptions:
-            if d.get("lang") == "en":
-                description = d.get("value")
-                break
-
-        if not cve_id:
-            continue
-
-        detail_url = f"https://nvd.nist.gov/vuln/detail/{cve_id}"
+        desc = next(
+            (d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"),
+            ""
+        )
 
         items.append({
             "id": cve_id,
             "score": score,
-            "text": (
-                f"CVE ID: {cve_id}\n"
-                f"CVSS Score: {score}\n\n"
-                f"Description:\n{description}"
-            ),
-            "url": detail_url
+            "text": f"{cve_id}\nCVSS {score}\n\n{desc}",
+            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+            "published_at": published_at,
+            "fetched_at": now_utc
         })
 
     return items
@@ -203,7 +207,6 @@ def fetch_nvd(site):
 # ==========================
 
 def post_bluesky(client, text, url):
-    
     try:
         resp = requests.get(
             "https://cardyb.bsky.app/v1/extract",
@@ -211,18 +214,12 @@ def post_bluesky(client, text, url):
             timeout=10
         )
         card = resp.json()
-
         image_blob = None
 
-        image_url = card.get("image")
-        if image_url:
-            img_resp = requests.get(image_url, timeout=10)
-            if img_resp.status_code == 200:
-                if len(img_resp.content) < 1_000_000:
-                    upload = client.upload_blob(img_resp.content)
-                    image_blob = upload.blob
-                else:
-                    logging.info("Image too large, skipping thumbnail")
+        if card.get("image"):
+            img = requests.get(card["image"], timeout=10)
+            if img.status_code == 200 and len(img.content) < 1_000_000:
+                image_blob = client.upload_blob(img.content).blob
 
         embed = models.AppBskyEmbedExternal.Main(
             external=models.AppBskyEmbedExternal.External(
@@ -232,7 +229,6 @@ def post_bluesky(client, text, url):
                 thumb=image_blob
             )
         )
-
         client.send_post(text=text, embed=embed)
 
     except Exception as e:
@@ -247,26 +243,13 @@ def post_bluesky(client, text, url):
 def main():
 
     logging.basicConfig(
-        level=logging.INFO,
-        format="%(levelname)s:%(name)s:%(message)s"
+        level=logging.DEBUG,  # ★ DEBUGまでJST併記
+        format="%(levelname)s:%(message)s"
     )
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
     bluesky_id = os.environ.get("BLUESKY_IDENTIFIER")
     bluesky_pw = os.environ.get("BLUESKY_PASSWORD")
-
-    if not bluesky_id or not bluesky_pw:
-        raise ValueError("Bluesky credentials not set")
-
-    if not gemini_key:
-        raise ValueError("GEMINI_API_KEY not set")
-
-    # BlueskyのID、Passのデバッグ
-    #print("DEBUG ID:", bluesky_id)
-    #print("DEBUG PW length:", len(bluesky_pw) if bluesky_pw else None)
-    #print("ID raw repr:", repr(bluesky_id))
-    #print("PW raw repr:", repr(bluesky_pw))
-
 
     client = Client(base_url="https://bsky.social")
     client.login(bluesky_id, bluesky_pw)
@@ -277,117 +260,49 @@ def main():
     sites = config.get("sites", {})
 
     def get_summary(text):
-        if force_test:
-            return text[:200]
-        return summarize(text, gemini_key)
+        return text[:200] if force_test else summarize(text, gemini_key)
 
-    MODE = "Prod"   # "test" or "prod"
-
-    # ==========================
-    # テストモード
-    # ==========================
-    if MODE == "test":
-
-        logging.info("Test single real item (all enabled sites)")
-
-        for site_key, site in sites.items():
-
-            if not site.get("enabled", True):
-                continue
-
-            logging.info(f"Testing site: {site_key}")
-
-            if site["type"] == "rss":
-                items = fetch_rss(site)
-            elif site["type"] == "nvd_api":
-                items = fetch_nvd(site)
-            else:
-                continue
-
-            if not items:
-                continue
-
-            item = items[0]
-
-            summary = get_summary(item["text"])
-            post_text = format_post(site, summary, item["url"], item)
-
-            logging.info("[TEST] " + post_text)
-
-            logging.info("Test completed")
-
-            sleep_seconds = random.randint(45, 120)
-            time.sleep(sleep_seconds)
-
-            #最初のサイト1件のみにするときは以下を有効に、無効だと全サイト
-            #return           # ← ★ ここが重要
-
-        return
-
-    # ==========================
-    # 本番モード
-    # ==========================
     state = load_state()
-
     if "_posted_cves" not in state:
         state["_posted_cves"] = []
-
-    skip_first = settings.get("skip_existing_on_first_run", True)
 
     for site_key, site in sites.items():
 
         if not site.get("enabled", True):
             continue
 
-        if site_key not in state:
-            state[site_key] = []
-
         logging.info(f"Processing: {site_key}")
 
-        if site["type"] == "rss":
-            items = fetch_rss(site)
-        elif site["type"] == "nvd_api":
-            items = fetch_nvd(site)
-        else:
-            logging.warning(f"Unknown type: {site['type']}")
-            continue
+        items = (
+            fetch_rss(site) if site["type"] == "rss"
+            else fetch_nvd(site) if site["type"] == "nvd_api"
+            else []
+        )
 
-        if not state[site_key] and skip_first:
-            logging.info("Initial run → skip existing")
-            state[site_key] = [item["id"] for item in items]
-            continue
+        for item in items:
 
-        new_items = [
-            item for item in items
-            if item["id"] not in state[site_key]
-        ]
+            if item.get("published_at"):
+                logging.debug(
+                    f"published_at = {format_utc_with_jst(item['published_at'])}"
+                )
 
-        if not new_items:
-            logging.info("No new items")
-            continue
-
-        for item in new_items:
-
-            cve_id = item.get("id")
-
-            if site_key == "jvn" and cve_id in state["_posted_cves"]:
-                logging.info(f"Skip duplicate CVE (JVN): {cve_id}")
-                continue
+            logging.debug(
+                f"fetched_at   = {format_utc_with_jst(item['fetched_at'])}"
+            )
 
             summary = get_summary(item["text"])
             post_text = format_post(site, summary, item["url"], item)
 
             post_bluesky(client, post_text, item["url"])
-            sleep_seconds = random.randint(30, 90)
-            time.sleep(sleep_seconds)
-            logging.info("Posted successfully")
+            posted_at = datetime.now(timezone.utc)
 
-            state[site_key].append(item["id"])
+            logging.info(
+                f"posted_at    = {format_utc_with_jst(posted_at)}"
+            )
 
-            if site_key == "nvd":
-                state["_posted_cves"].append(item["id"])
+            time.sleep(random.randint(30, 90))
 
-        save_state(state)
+    save_state(state)
 
 
 if __name__ == "__main__":
