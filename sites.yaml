@@ -2,7 +2,7 @@
 # 全体設定
 # ============================================
 settings:
-  mode: test # モード選択　test / prod testモードは1件のみ、prodはmax_item
+  mode: prod # モード選択　test / prod testモードは1件のみ、prodはmax_item
   log_level: INFO
   force_test_mode: true # Gemini呼び出しのON/OFF
   # 初回実行時は既存記事を通知せず
