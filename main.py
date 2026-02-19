@@ -20,7 +20,7 @@ MAX_POST_LENGTH = 140
 
 
 # ==========================
-# 時刻ユーティリティ（NVD 用）
+# 時刻ユーティリティ
 # ==========================
 
 def utc_now():
@@ -65,6 +65,15 @@ def cvss_to_severity(score):
         return "MEDIUM"
     else:
         return "LOW"
+
+
+def body_trim(text, max_len=2500):
+    """
+    Gemini に渡す前の本文前処理（常時実行）
+    """
+    lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
+    trimmed = "\n".join(lines[:6])
+    return trimmed[:max_len]
 
 
 def format_post(site, summary, url, item):
@@ -253,7 +262,9 @@ def main():
     force_test = settings.get("force_test_mode", False)
     skip_first = settings.get("skip_existing_on_first_run", True)
 
-    state = load_state()
+    original_state = load_state()
+    state = json.loads(json.dumps(original_state))  # deep copy
+    state_dirty = False
 
     # --- Gemini / Bluesky ---
     gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -265,84 +276,87 @@ def main():
         client.login(bluesky_id, bluesky_pw)
 
     def get_summary(text):
-        return text[:200] if force_test else summarize(text, gemini_key)
-
-    # ==========================
-    # NVD 期間決定（唯一）
-    # ==========================
+        return text[:100] if force_test else summarize(text, gemini_key)
 
     now = utc_now()
-
-    if "last_checked_at" not in state:
-        logging.info("Initial NVD run → last 1 day")
-        pub_start = now - timedelta(days=1)
-    else:
-        pub_start = datetime.fromisoformat(
-            state["last_checked_at"].replace("Z", "+00:00")
-        )
-
-    pub_end = now
 
     # ==========================
     # サイト処理
     # ==========================
-
-    state.setdefault("_posted_cves", [])
 
     for site_key, site in sites.items():
 
         if not site.get("enabled", False):
             continue
 
-        state.setdefault(site_key, [])
-
         logging.info(f"Processing: {site_key}")
 
-        if site["type"] == "rss":
-            items = fetch_rss(site)
-        elif site["type"] == "nvd_api":
+        state.setdefault(site_key, [])
+
+        # ---------- NVD ----------
+        if site["type"] == "nvd_api":
+
+            nvd_state = state.setdefault("nvd", {})
+            last_checked = nvd_state.get("last_checked_at")
+
+            if not last_checked:
+                logging.info("NVD initial run → last 1 day")
+                pub_start = now - timedelta(days=1)
+            else:
+                pub_start = datetime.fromisoformat(
+                    last_checked.replace("Z", "+00:00")
+                )
+
+            pub_end = now
             items = fetch_nvd(site, pub_start, pub_end)
+
+        # ---------- RSS ----------
+        elif site["type"] == "rss":
+            items = fetch_rss(site)
+
         else:
             continue
 
+        # ---------- TEST ----------
         if MODE == "test":
             if items:
                 item = items[0]
-                summary = get_summary(item["text"])
+                trimmed = body_trim(item["text"])
+                summary = get_summary(trimmed)
                 post_text = format_post(site, summary, item["url"], item)
                 logging.info("[TEST]\n" + post_text)
             continue
 
-        # --- prod ---
-        if not state[site_key] and skip_first:
+        # ---------- PROD ----------
+        if site["type"] == "rss" and not state[site_key] and skip_first:
             logging.info("Initial run → skip existing")
             state[site_key] = [item["id"] for item in items]
+            state_dirty = True
             continue
 
         for item in items:
             if item["id"] in state[site_key]:
+                logging.info(f"Skip known: {item['id']}")
                 continue
 
-            if site_key == "jvn" and item["id"] in state["_posted_cves"]:
-                continue
-
-            summary = get_summary(item["text"])
+            trimmed = body_trim(item["text"])
+            summary = get_summary(trimmed)
             post_text = format_post(site, summary, item["url"], item)
 
             post_bluesky(client, post_text, item["url"])
             time.sleep(random.randint(30, 90))
 
             state[site_key].append(item["id"])
+            state_dirty = True
 
-            if site_key == "nvd":
-                state["_posted_cves"].append(item["id"])
+            if site["type"] == "nvd_api":
+                state["nvd"]["last_checked_at"] = isoformat(now)
 
     # ==========================
-    # state 更新（正常終了時のみ）
+    # state 更新（prod & 正常終了）
     # ==========================
 
-    if MODE == "prod":
-        state["last_checked_at"] = isoformat(now)
+    if MODE == "prod" and state_dirty:
         save_state(state)
 
 
