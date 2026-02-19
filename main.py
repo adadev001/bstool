@@ -10,35 +10,29 @@ from google import genai
 from atproto import Client, models
 from datetime import datetime, timedelta, timezone
 
-# ==================================================
+# ==========================
 # 定数
-# ==================================================
+# ==========================
 
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 MAX_POST_LENGTH = 140
 
-# RSS / API の時刻ズレ耐性用（任意だが安全）
-SAFE_OVERLAP = timedelta(minutes=5)
 
-# ==================================================
+# ==========================
 # 時刻ユーティリティ
-# ==================================================
+# ==========================
 
 def utc_now():
     return datetime.now(timezone.utc)
 
-def isoformat(dt: datetime) -> str:
-    """UTC datetime を NVD / state 共通 ISO 文字列へ"""
+def isoformat(dt):
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
-def parse_iso(ts: str) -> datetime:
-    """state に保存された ISO 文字列を datetime に戻す"""
-    return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
-# ==================================================
-# 設定 / state I/O
-# ==================================================
+# ==========================
+# 設定 / state
+# ==========================
 
 def load_config():
     with open(SITES_FILE, "r", encoding="utf-8") as f:
@@ -53,15 +47,16 @@ def load_state():
         except Exception:
             return {}
 
-def save_state(state: dict):
+def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-# ==================================================
-# 共通ユーティリティ
-# ==================================================
 
-def cvss_to_severity(score: float) -> str:
+# ==========================
+# 共通ユーティリティ
+# ==========================
+
+def cvss_to_severity(score):
     if score >= 9.0:
         return "CRITICAL"
     elif score >= 7.0:
@@ -71,50 +66,43 @@ def cvss_to_severity(score: float) -> str:
     else:
         return "LOW"
 
-def body_trim(text: str, max_len: int = 2500) -> str:
+
+def body_trim(text, max_len=2500):
     """
     Gemini に渡す前の本文前処理（常時実行）
-    - 極端に短い行を除外
-    - 冒頭から数段落のみ使用
     """
     lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
     trimmed = "\n".join(lines[:6])
     return trimmed[:max_len]
 
-def format_post(site: dict, summary: str, url: str, item: dict) -> str:
-    """
-    投稿本文生成
-    - NVD は CVE / CVSS 情報を付加
-    - 最終的に MAX_POST_LENGTH 以内へ
-    """
+
+def format_post(site, summary, url, item):
     body = summary.replace("\n", " ").strip()
 
     if site["type"] == "nvd_api":
         cve_id = item["id"]
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-        base = (
+
+        base_text = (
             f"{cve_id}\n"
             f"CVSS {score} | {severity}\n\n"
             f"{body}"
         )
     else:
-        base = body
+        base_text = body
 
-    if len(base) > MAX_POST_LENGTH:
-        base = base[:MAX_POST_LENGTH - 1] + "…"
+    if len(base_text) > MAX_POST_LENGTH:
+        base_text = base_text[:MAX_POST_LENGTH - 1] + "…"
 
-    return base
+    return base_text
 
-# ==================================================
+
+# ==========================
 # Gemini 要約
-# ==================================================
+# ==========================
 
-def summarize(text: str, api_key: str, max_retries: int = 3) -> str:
-    """
-    Gemini 2.5 flash-lite による要約
-    force_test_mode=false の場合のみ呼ばれる
-    """
+def summarize(text, api_key, max_retries=3):
     client = genai.Client(api_key=api_key)
 
     prompt = f"""
@@ -142,37 +130,18 @@ def summarize(text: str, api_key: str, max_retries: int = 3) -> str:
             else:
                 raise
 
-    # fallback
     return text[:100]
 
-# ==================================================
-# RSS 取得（時間軸主導）
-# ==================================================
 
-def fetch_rss(site: dict, start: datetime, end: datetime):
-    """
-    RSS を取得し、start < entry_time <= end のものだけ返す
-    """
+# ==========================
+# RSS
+# ==========================
+
+def fetch_rss(site):
     feed = feedparser.parse(site["url"])
     items = []
 
-    for entry in feed.entries:
-        # RSS の時刻は published / updated を優先
-        published = (
-            entry.get("published_parsed")
-            or entry.get("updated_parsed")
-        )
-
-        if not published:
-            continue
-
-        entry_time = datetime.fromtimestamp(
-            time.mktime(published), tz=timezone.utc
-        )
-
-        if not (start < entry_time <= end):
-            continue
-
+    for entry in feed.entries[:site.get("max_items", 1)]:
         link = entry.get("link")
         if not link:
             continue
@@ -180,29 +149,28 @@ def fetch_rss(site: dict, start: datetime, end: datetime):
         items.append({
             "id": link,
             "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
-            "url": link,
-            "entry_time": entry_time
+            "url": link
         })
-
-        if len(items) >= site.get("max_items", 1):
-            break
 
     return items
 
-# ==================================================
-# NVD 取得（時間軸主導）
-# ==================================================
 
-def fetch_nvd(site: dict, start: datetime, end: datetime):
+# ==========================
+# NVD（期間指定）
+# ==========================
+
+def fetch_nvd(site, pub_start, pub_end):
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 
     params = {
         "resultsPerPage": site.get("max_items", 50),
-        "pubStartDate": isoformat(start),
-        "pubEndDate": isoformat(end),
+        "pubStartDate": isoformat(pub_start),
+        "pubEndDate": isoformat(pub_end),
     }
 
-    logging.info(f"NVD query: {params['pubStartDate']} → {params['pubEndDate']}")
+    logging.info(
+        f"NVD query: {params['pubStartDate']} → {params['pubEndDate']}"
+    )
 
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
@@ -231,19 +199,17 @@ def fetch_nvd(site: dict, start: datetime, end: datetime):
             "id": cve_id,
             "score": score,
             "text": cve_id,
-            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}"
         })
 
     return items
 
-# ==================================================
-# Bluesky 投稿
-# ==================================================
 
-def post_bluesky(client: Client, text: str, url: str):
-    """
-    OGP が取れれば embed 付き、失敗したら text のみ
-    """
+# ==========================
+# Bluesky 投稿
+# ==========================
+
+def post_bluesky(client, text, url):
     try:
         resp = requests.get(
             "https://cardyb.bsky.app/v1/extract",
@@ -276,9 +242,10 @@ def post_bluesky(client: Client, text: str, url: str):
         logging.warning(f"Embed failed: {e}")
         client.send_post(text=text)
 
-# ==================================================
+
+# ==========================
 # main
-# ==================================================
+# ==========================
 
 def main():
 
@@ -295,14 +262,12 @@ def main():
     force_test = settings.get("force_test_mode", False)
     skip_first = settings.get("skip_existing_on_first_run", True)
 
-    # 元 state を保持（commit 方式）
+    # 元 state を読み込み、commit 用に deep copy
     original_state = load_state()
     state = json.loads(json.dumps(original_state))
     state_dirty = False
 
-    now = utc_now()
-
-    # --- 外部サービス ---
+    # --- Gemini / Bluesky ---
     gemini_key = os.environ.get("GEMINI_API_KEY")
     bluesky_id = os.environ.get("BLUESKY_IDENTIFIER")
     bluesky_pw = os.environ.get("BLUESKY_PASSWORD")
@@ -311,13 +276,15 @@ def main():
         client = Client(base_url="https://bsky.social")
         client.login(bluesky_id, bluesky_pw)
 
-    def get_summary(text: str) -> str:
-        # test + force_test_mode では Gemini を絶対に呼ばない
+    def get_summary(text):
+        # test + force_test_mode では Gemini を使わない
         return text[:100] if force_test else summarize(text, gemini_key)
 
-    # ==================================================
+    now = utc_now()
+
+    # ==========================
     # サイト処理
-    # ==================================================
+    # ==========================
 
     for site_key, site in sites.items():
 
@@ -326,52 +293,84 @@ def main():
 
         logging.info(f"Processing: {site_key}")
 
-        # --- state 正規化 ---
+        # --------------------------
+        # state 正規化（後方互換）
+        # --------------------------
+
         raw = state.get(site_key)
 
-        # 旧 list state → dict へ移行
         if isinstance(raw, list):
-            logging.info(f"Migrate state [{site_key}]: list → dict")
-            state[site_key] = {"last_checked_at": None}
+            if MODE == "test":
+                logging.info(
+                    f"Migrate state [{site_key}]: list → dict (TEST: not saved)"
+                )
+            else:
+                logging.info(
+                    f"Migrate state [{site_key}]: list → dict"
+                )
+
+            state[site_key] = {
+                "posted_ids": raw
+            }
             state_dirty = True
 
-        site_state = state.setdefault(site_key, {})
+        site_state = state.setdefault(site_key, {"posted_ids": []})
 
-        last_checked = site_state.get("last_checked_at")
-        if last_checked:
-            start = parse_iso(last_checked) - SAFE_OVERLAP
-        else:
-            start = now - timedelta(days=1)
+        # ---------- NVD ----------
+        if site["type"] == "nvd_api":
 
-        end = now
+            last_checked = site_state.get("last_checked_at")
 
-        # --- 取得 ---
-        if site["type"] == "rss":
-            items = fetch_rss(site, start, end)
-        elif site["type"] == "nvd_api":
-            items = fetch_nvd(site, start, end)
+            if not last_checked:
+                logging.info("NVD initial run → last 1 day")
+                pub_start = now - timedelta(days=1)
+            else:
+                pub_start = datetime.fromisoformat(
+                    last_checked.replace("Z", "+00:00")
+                )
+
+            pub_end = now
+            items = fetch_nvd(site, pub_start, pub_end)
+
+        # ---------- RSS ----------
+        elif site["type"] == "rss":
+            items = fetch_rss(site)
+
         else:
             continue
 
-        # --- TEST モード ---
+        # ---------- TEST ----------
         if MODE == "test":
-            if items:
-                item = items[0]
-                trimmed = body_trim(item["text"])
-                summary = get_summary(trimmed)
-                post_text = format_post(site, summary, item["url"], item)
-                logging.info("[TEST]\n" + post_text)
+
+            if not items:
+                logging.info(f"[TEST] {site_key}: no new items")
+                continue
+
+            item = items[0]
+            trimmed = body_trim(item["text"])
+            summary = get_summary(trimmed)
+            post_text = format_post(site, summary, item["url"], item)
+
+            logging.info("[TEST]\n" + post_text)
             continue
 
-        # --- PROD 初回スキップ ---
-        if not last_checked and skip_first:
+        # ---------- PROD ----------
+
+        if site["type"] == "rss" and not site_state["posted_ids"] and skip_first:
             logging.info("Initial run → skip existing")
-            site_state["last_checked_at"] = isoformat(now)
+            site_state["posted_ids"] = [item["id"] for item in items]
             state_dirty = True
             continue
 
-        # --- PROD 投稿 ---
+        if not items:
+            logging.info(f"{site_key}: no new items")
+            continue
+
         for item in items:
+            if item["id"] in site_state["posted_ids"]:
+                logging.info(f"Skip known: {item['id']}")
+                continue
+
             trimmed = body_trim(item["text"])
             summary = get_summary(trimmed)
             post_text = format_post(site, summary, item["url"], item)
@@ -379,16 +378,19 @@ def main():
             post_bluesky(client, post_text, item["url"])
             time.sleep(random.randint(30, 90))
 
-        # --- commit（サイト単位） ---
-        site_state["last_checked_at"] = isoformat(now)
-        state_dirty = True
+            site_state["posted_ids"].append(item["id"])
+            state_dirty = True
 
-    # ==================================================
-    # state commit（prod & 正常終了時のみ）
-    # ==================================================
+            if site["type"] == "nvd_api":
+                site_state["last_checked_at"] = isoformat(now)
+
+    # ==========================
+    # state commit（prod & 正常終了）
+    # ==========================
 
     if MODE == "prod" and state_dirty:
         save_state(state)
+
 
 if __name__ == "__main__":
     main()
