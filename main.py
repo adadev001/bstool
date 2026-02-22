@@ -67,47 +67,6 @@ def cvss_to_severity(score):
         return "LOW"
 
 # ==========================
-# NVD 脆弱性タイプ分類
-# ==========================
-
-def classify_vuln_type(text: str) -> str:
-    """
-    NVD / JVD 共通で使える軽量分類器
-    """
-    t = text.lower()
-
-    if any(k in t for k in [
-        "remote code execution",
-        "arbitrary code execution",
-        "execute arbitrary code",
-        "code execution"
-    ]):
-        return "任意コード実行"
-
-    if any(k in t for k in [
-        "denial of service",
-        "dos",
-        "service crash"
-    ]):
-        return "サービス拒否（DoS）"
-
-    if any(k in t for k in [
-        "information disclosure",
-        "information leak",
-        "leak",
-        "expose sensitive"
-    ]):
-        return "情報漏えい"
-
-    if any(k in t for k in [
-        "privilege escalation",
-        "elevation of privilege"
-    ]):
-        return "権限昇格"
-
-    return "セキュリティ上の問題"
-
-# ==========================
 # 本文前処理
 # ==========================
 
@@ -131,7 +90,6 @@ def body_trim(text, max_len=2500, site_type=None):
         joined = " ".join(lines)
         return joined[:max_len]
 
-    # RSS / その他
     lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
     trimmed = "\n".join(lines[:6])
     return trimmed[:max_len]
@@ -147,7 +105,6 @@ def format_post(site, summary, url, item):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
 
-        # タイトルは完全に廃止
         base_text = (
             f"{body}\n\n"
             f"CVSS {score} | {severity}\n"
@@ -168,12 +125,11 @@ def format_post(site, summary, url, item):
 def summarize(text, api_key, site_type=None, max_retries=3):
     client = genai.Client(api_key=api_key)
 
-    # --- NVD 専用指示 ---
     if site_type == "nvd_api":
         prompt = f"""
 以下の観点を必ず含め、日本語80〜100文字で要約してください。
 
-- 脆弱性の種類
+- 何が問題か
 - 影響を受ける対象
 - 攻撃者が可能になる行為
 
@@ -210,9 +166,11 @@ def summarize(text, api_key, site_type=None, max_retries=3):
             else:
                 break
 
-    # --- fallback（LLM失敗時） ---
-    vuln_type = classify_vuln_type(text)
-    return f"{vuln_type}に関する脆弱性が確認されました。影響範囲や条件については現在調査中です。"
+    # --- fallback（分類しない・中立文） ---
+    return (
+        "当該ソフトウェアに関する脆弱性が報告されています。"
+        "影響範囲や悪用条件については現在確認中です。"
+    )
 
 # ==========================
 # RSS（時間軸対応）
@@ -283,7 +241,6 @@ def fetch_nvd(site, pub_start, pub_end):
         if not cve_id or score < threshold:
             continue
 
-        # --- description を本文として使用 ---
         description = ""
         descs = cve.get("descriptions", [])
         if descs:
@@ -355,7 +312,7 @@ def main():
     skip_first = settings.get("skip_existing_on_first_run", True)
 
     original_state = load_state()
-    state = json.loads(json.dumps(original_state))  # deep copy
+    state = json.loads(json.dumps(original_state))
     state_dirty = False
 
     gemini_key = os.environ.get("GEMINI_API_KEY")
@@ -381,15 +338,10 @@ def main():
 
         raw = state.get(site_key)
 
-        # --- state 正規化（list → dict） ---
         if isinstance(raw, list):
-            logging.info(
-                f"Migrate state [{site_key}]: list → dict"
-                + (" (TEST: not saved)" if MODE == "test" else "")
-            )
             state[site_key] = {
                 "last_checked_at": None,
-                "posted_ids": raw  # 将来 JVD/NVD 重複防止用
+                "posted_ids": raw
             }
             if MODE == "prod":
                 state_dirty = True
@@ -399,7 +351,6 @@ def main():
 
         if not last_checked:
             if skip_first:
-                logging.info(f"{site_key}: initial run → skip existing")
                 site_state["last_checked_at"] = isoformat(now)
                 if MODE == "prod":
                     state_dirty = True
@@ -410,7 +361,6 @@ def main():
 
         until = now
 
-        # ---------- fetch ----------
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -419,31 +369,30 @@ def main():
             continue
 
         if not items:
-            logging.info(f"{site_key}: no new items")
             if MODE == "prod":
                 site_state["last_checked_at"] = isoformat(now)
                 state_dirty = True
             continue
 
-        # ---------- TEST ----------
         if MODE == "test":
             item = items[0]
             summary = get_summary(
                 body_trim(item["text"], site_type=site["type"]),
                 site["type"]
             )
-            post_text = format_post(site, summary, item["url"], item)
-            logging.info("[TEST]\n" + post_text)
+            logging.info("[TEST]\n" + format_post(site, summary, item["url"], item))
             continue
 
-        # ---------- PROD ----------
         for item in items:
             summary = get_summary(
                 body_trim(item["text"], site_type=site["type"]),
                 site["type"]
             )
-            post_text = format_post(site, summary, item["url"], item)
-            post_bluesky(client, post_text, item["url"])
+            post_bluesky(
+                client,
+                format_post(site, summary, item["url"], item),
+                item["url"]
+            )
             time.sleep(random.randint(30, 90))
 
         site_state["last_checked_at"] = isoformat(now)
