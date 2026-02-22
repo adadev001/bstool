@@ -32,7 +32,7 @@ sites:
     display_name: Security NEXT
     type: rss
     url: https://www.security-next.com/feed
-    enabled: false
+    enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
 
