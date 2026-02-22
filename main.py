@@ -86,9 +86,7 @@ def normalize_site_state(site_key, raw_state, now, mode):
 
     posted = raw_state.get("posted_ids")
     if isinstance(posted, list):
-        raw_state["posted_ids"] = {
-            cid: isoformat(now) for cid in posted
-        }
+        raw_state["posted_ids"] = {cid: isoformat(now) for cid in posted}
         migrated = True
 
     raw_state.setdefault("posted_ids", {})
@@ -106,22 +104,18 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
     """
     before = len(posted_ids)
 
+    # 保持期間超過の削除
     cutoff = now - timedelta(days=POSTED_ID_RETENTION_DAYS)
-    expired = [
-        cid for cid, ts in posted_ids.items()
-        if parse_iso(ts) < cutoff
-    ]
+    expired = [cid for cid, ts in posted_ids.items() if parse_iso(ts) < cutoff]
     for cid in expired:
         del posted_ids[cid]
 
+    # 件数上限超過の削除（古い順）
     if len(posted_ids) > POSTED_ID_MAX:
         logging.warning(
             f"posted_ids exceeded max ({POSTED_ID_MAX}), trimming old entries"
         )
-        sorted_items = sorted(
-            posted_ids.items(),
-            key=lambda x: parse_iso(x[1])
-        )
+        sorted_items = sorted(posted_ids.items(), key=lambda x: parse_iso(x[1]))
         for cid, _ in sorted_items[:-POSTED_ID_MAX]:
             del posted_ids[cid]
 
@@ -179,28 +173,24 @@ def safe_truncate(text: str, limit: int) -> str:
 def format_post(site, summary, item):
     """
     投稿文生成
-    - NVD/JVN: 本文＋CVSS＋CVE＋URL
-    - RSS: 本文＋URL
-    - URLは必ず末尾に付与（今回修正）
-    - MAX_POST_LENGTH で安全にトリム
+    - 本文＋URL＋CVE（NVD/JVNのみ）
+    - 最大 MAX_POST_LENGTH 文字で途切れ防止
     """
-    # 1. 要約本文を取得
-    body = summary.replace("\n", " ").strip()
+    url = item.get("url", "")
+    url_block = f"\n{url}" if url else ""
 
-    # 2. NVD/JVNの場合は CVSS スコアと CVE番号を本文末に付与
+    body = summary.replace("\n", " ").strip() + url_block
+
+    # NVD/JVN は CVSS と CVE番号も末尾に追加
     if site["type"] in ("nvd_api", "jvn"):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-        # ここで CVSS / severity / CVE を本文末にまとめる
-        body = f"{body}\nCVSS {score} | {severity}\n{item['id']}"
+        base_text = f"{body}\nCVSS {score} | {severity}\n{item['id']}"
+    else:
+        base_text = body
 
-    # 3. URLは必ず末尾に追加（RSSも含む全サイト統一）
-    url = item.get("url", "")
-    if url:
-        body += f"\n{url}"  # ← ここが今回の修正ポイント
-
-    # 4. 最終的に MAX_POST_LENGTH で安全トリム
-    return safe_truncate(body, MAX_POST_LENGTH)
+    # 最終安全トリム（X対応）
+    return safe_truncate(base_text, MAX_POST_LENGTH)
 
 # =========================================================
 # Gemini 要約（80文字安全制限）
@@ -242,6 +232,7 @@ def summarize(text, api_key, site_type=None):
             model="gemini-2.5-flash-lite",
             contents=prompt
         )
+        # 安全トリムで80文字程度に収める
         return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
     except Exception:
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
@@ -259,10 +250,7 @@ def fetch_rss(site, since, until):
         if not published:
             continue
 
-        entry_time = datetime.fromtimestamp(
-            time.mktime(published),
-            tz=timezone.utc
-        )
+        entry_time = datetime.fromtimestamp(time.mktime(published), tz=timezone.utc)
 
         if not (since < entry_time <= until):
             continue
@@ -270,7 +258,7 @@ def fetch_rss(site, since, until):
         items.append({
             "id": entry.get("link"),
             "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
-            "url": entry.get("link"),  # URL を item に格納
+            "url": entry.get("link"),
             "entry_time": entry_time
         })
 
@@ -311,7 +299,7 @@ def fetch_nvd(site, start, end):
             "id": cid,
             "score": score,
             "text": desc,
-            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"  # URL を必ず格納
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"
         })
 
     return items
@@ -324,18 +312,12 @@ def fetch_jvn(site, since, until):
         if not entry.get("published_parsed"):
             continue
 
-        entry_time = datetime.fromtimestamp(
-            time.mktime(entry.published_parsed),
-            tz=timezone.utc
-        )
+        entry_time = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
 
         if not (since < entry_time <= until):
             continue
 
-        cve_ids = [
-            t for t in entry.get("tags", [])
-            if t.get("term", "").startswith("CVE-")
-        ]
+        cve_ids = [t for t in entry.get("tags", []) if t.get("term", "").startswith("CVE-")]
         if not cve_ids:
             continue
 
@@ -343,7 +325,7 @@ def fetch_jvn(site, since, until):
             "id": cve_ids[0]["term"],
             "score": site.get("default_cvss", 0),
             "text": entry.get("summary", ""),
-            "url": entry.get("link"),  # URL を必ず格納
+            "url": entry.get("link"),
             "entry_time": entry_time
         })
 
@@ -385,9 +367,8 @@ def main():
         if not site.get("enabled"):
             continue
 
-        site_state, migrated = normalize_site_state(
-            site_key, state.get(site_key), now, MODE
-        )
+        # state 正規化（posted_ids list → dict 等）
+        site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
         state[site_key] = site_state
         if migrated and MODE == "prod":
             state_dirty = True
@@ -395,10 +376,12 @@ def main():
         posted_ids = site_state["posted_ids"]
         last_checked = site_state.get("last_checked_at")
 
+        # 初回実行時は既存分スキップ
         if not last_checked:
             if skip_first and MODE == "prod":
                 site_state["last_checked_at"] = isoformat(now)
                 state_dirty = True
+                logging.info(f"No new items for [{site_key}] (initial run skipped)")
                 continue
             since = now - timedelta(days=1)
         else:
@@ -406,6 +389,7 @@ def main():
 
         until = now
 
+        # データ取得
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -415,29 +399,43 @@ def main():
         else:
             continue
 
+        if not items:
+            logging.info(f"No new items found for [{site_key}] between {since} and {until}")
+            continue
+
         for item in items:
             cid = item.get("id")
             if cid in posted_ids:
                 continue
 
+            # 本文抽出 → 要約 → 投稿文生成
             trimmed = body_trim(item["text"], site_type=site["type"])
-            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
-                trimmed, gemini_key, site["type"]
-            )
+            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
             post_text = format_post(site, summary, item)
 
+            # testモードではログ出力のみ
             if MODE == "test":
                 logging.info("[TEST]\n" + post_text)
-                continue
+            else:
+                # 本番投稿
+                post_bluesky(client, post_text, item["url"])
+                logging.info(f"Posted new item for [{site_key}]: {cid}")
 
-            post_bluesky(client, post_text, item["url"])
+            # posted_id 追加
             posted_ids[cid] = isoformat(now)
-            prune_posted_ids(posted_ids, now)
-            time.sleep(random.randint(30, 90))
+            logging.info(f"Added posted_id: {cid}")
+
+            # prune 適用
+            pruned = prune_posted_ids(posted_ids, now)
+            if pruned > 0:
+                logging.info(f"Pruned {pruned} old posted_ids for [{site_key}]")
+
+            time.sleep(random.randint(30, 90))  # 投稿間隔ランダム
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
+    # state 保存
     if MODE == "prod" and state_dirty:
         save_state(state)
 
