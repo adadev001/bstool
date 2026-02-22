@@ -50,7 +50,7 @@ sites:
   # ------------------------------------------
   # jvn
   # ------------------------------------------
- jvn:
+  jvn:
     enabled: true
     type: jvn_rss
     url: https://jvndb.jvn.jp/apis/myjvn?method=getVulnOverviewList&feed=hnd
