@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 MAX_POST_LENGTH = 140
+SUMMARY_HARD_LIMIT = 80   # ★ 要約の安全上限（途切れ防止）
 
 # posted_ids 運用ルール
 POSTED_ID_RETENTION_DAYS = 30   # 保持期間（日）
@@ -161,8 +162,13 @@ def body_trim(text, max_len=2500, site_type=None):
     return "\n".join(lines[:6])[:max_len]
 
 # =========================================================
-# 投稿文生成
+# 投稿文生成（最終安全トリム付き）
 # =========================================================
+
+def safe_truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 def format_post(site, summary, item):
     body = summary.replace("\n", " ").strip()
@@ -178,13 +184,10 @@ def format_post(site, summary, item):
     else:
         base_text = body
 
-    if len(base_text) > MAX_POST_LENGTH:
-        base_text = base_text[:MAX_POST_LENGTH - 1] + "…"
-
-    return base_text
+    return safe_truncate(base_text, MAX_POST_LENGTH)
 
 # =========================================================
-# Gemini 要約
+# Gemini 要約（80文字安全制限）
 # =========================================================
 
 def summarize(text, api_key, site_type=None):
@@ -192,7 +195,7 @@ def summarize(text, api_key, site_type=None):
 
     if site_type in ("nvd_api", "jvn"):
         prompt = f"""
-以下の観点を必ず含め、日本語80〜100文字で要約してください。
+以下の観点を必ず含め、日本語80文字以内で要約してください。
 
 - 脆弱性の内容
 - 影響を受ける対象
@@ -209,7 +212,7 @@ def summarize(text, api_key, site_type=None):
         prompt = f"""
 以下を日本語で簡潔に要約してください。
 事実のみ。誇張なし。
-100文字以内。
+80文字以内。
 
 {text}
 """
@@ -219,7 +222,7 @@ def summarize(text, api_key, site_type=None):
             model="gemini-2.5-flash-lite",
             contents=prompt
         )
-        return resp.text.strip()[:100]
+        return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
     except Exception:
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
 
@@ -370,16 +373,11 @@ def main():
             state_dirty = True
 
         posted_ids = site_state["posted_ids"]
-        before_count = len(posted_ids)
-
-        if site["type"] in ("nvd_api", "jvn"):
-            logging.info(f"{site_key}: posted_ids count = {before_count}")
 
         last_checked = site_state.get("last_checked_at")
 
         if not last_checked:
             if skip_first and MODE == "prod":
-                logging.info(f"{site_key}: initial run → skip existing")
                 site_state["last_checked_at"] = isoformat(now)
                 state_dirty = True
                 continue
@@ -398,53 +396,28 @@ def main():
         else:
             continue
 
-        if not items:
-            logging.info(f"{site_key}: no new items")
-            if MODE == "prod":
-                site_state["last_checked_at"] = isoformat(now)
-                state_dirty = True
-            continue
-
-        if MODE == "test":
-            item = items[0]
-            trimmed = body_trim(item["text"], site_type=site["type"])
-            summary = trimmed[:100] if force_test else summarize(
-                trimmed, gemini_key, site["type"]
-            )
-            post_text = format_post(site, summary, item)
-            logging.info("[TEST]\n" + post_text)
-            continue
-
-        added = 0
-        removed = 0
-
         for item in items:
             cid = item.get("id")
-
             if cid in posted_ids:
-                logging.info(f"{site_key}: skip duplicate {cid}")
                 continue
 
             trimmed = body_trim(item["text"], site_type=site["type"])
-            summary = summarize(trimmed, gemini_key, site["type"])
+            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
+                trimmed, gemini_key, site["type"]
+            )
             post_text = format_post(site, summary, item)
 
+            if MODE == "test":
+                logging.info("[TEST]\n" + post_text)
+                continue
+
             post_bluesky(client, post_text, item["url"])
-
             posted_ids[cid] = isoformat(now)
-            added += 1
-            removed += prune_posted_ids(posted_ids, now)
-
+            prune_posted_ids(posted_ids, now)
             time.sleep(random.randint(30, 90))
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
-
-        if site["type"] in ("nvd_api", "jvn"):
-            total = len(posted_ids)
-            logging.info(
-                f"{site_key}: posted_ids delta (+{added} / -{removed}) → total={total}"
-            )
 
     if MODE == "prod" and state_dirty:
         save_state(state)
