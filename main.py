@@ -161,7 +161,7 @@ def body_trim(text, max_len=2500, site_type=None):
     return "\n".join(lines[:6])[:max_len]
 
 # =========================================================
-# 投稿文生成（安全トリム＆URL必須）
+# 投稿文生成（安全トリム＆URL末尾保証）
 # =========================================================
 
 def safe_truncate(text: str, limit: int) -> str:
@@ -173,23 +173,26 @@ def safe_truncate(text: str, limit: int) -> str:
 def format_post(site, summary, item):
     """
     投稿文生成
-    - 本文＋URL＋CVE（NVD/JVNのみ）
-    - 最大 MAX_POST_LENGTH 文字で途切れ防止
+    - NVD/JVN: 要約 + CVE番号/Severity + URL末尾
+    - RSS: 要約 + URL末尾
+    - MAX_POST_LENGTH 文字以内で途切れ防止
     """
+    # URL は末尾に必ず付与（既存コード修正）
     url = item.get("url", "")
-    url_block = f"\n{url}" if url else ""
 
-    body = summary.replace("\n", " ").strip() + url_block
-
-    # NVD/JVN は CVSS と CVE番号も末尾に追加
     if site["type"] in ("nvd_api", "jvn"):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-        base_text = f"{body}\nCVSS {score} | {severity}\n{item['id']}"
-    else:
-        base_text = body
 
-    # 最終安全トリム（X対応）
+        # 修正箇所：
+        # 以前は URL が本文直後に入っていたため末尾ではなかった
+        # 今回、意図通り「要約→CVE+CVSS→URL」に並び替え
+        base_text = f"{summary}\n{item['id']} CVSS {score} | {severity}\n{url}"
+    else:
+        # RSS などは要約＋URL
+        base_text = f"{summary}\n{url}"
+
+    # 最終安全トリム
     return safe_truncate(base_text, MAX_POST_LENGTH)
 
 # =========================================================
@@ -232,7 +235,6 @@ def summarize(text, api_key, site_type=None):
             model="gemini-2.5-flash-lite",
             contents=prompt
         )
-        # 安全トリムで80文字程度に収める
         return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
     except Exception:
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
