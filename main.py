@@ -16,8 +16,8 @@ from datetime import datetime, timedelta, timezone
 
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
-MAX_POST_LENGTH = 140
-SUMMARY_HARD_LIMIT = 80   # ★ 要約の安全上限（途切れ防止）
+MAX_POST_LENGTH = 140           # 投稿本文の最大文字数（X移植前提）
+SUMMARY_HARD_LIMIT = 80         # 要約の安全上限（途切れ防止）
 
 # posted_ids 運用ルール
 POSTED_ID_RETENTION_DAYS = 30   # 保持期間（日）
@@ -146,6 +146,11 @@ def cvss_to_severity(score: float) -> str:
 # =========================================================
 
 def body_trim(text, max_len=2500, site_type=None):
+    """
+    本文の抽出・前処理
+    - NVD/JVN は脆弱性関連の文章のみ抽出
+    - RSS は6行までを抽出
+    """
     if site_type in ("nvd_api", "jvn"):
         lines = [
             l.strip()
@@ -162,28 +167,38 @@ def body_trim(text, max_len=2500, site_type=None):
     return "\n".join(lines[:6])[:max_len]
 
 # =========================================================
-# 投稿文生成（最終安全トリム付き）
+# 投稿文生成（安全トリム＆URL必須）
 # =========================================================
 
 def safe_truncate(text: str, limit: int) -> str:
+    """文字列を指定長に安全に切り詰める"""
     if len(text) <= limit:
         return text
     return text[: limit - 1] + "…"
 
 def format_post(site, summary, item):
-    body = summary.replace("\n", " ").strip()
+    """
+    投稿文生成
+    - 本文＋URL＋CVE（NVD/JVNのみ）
+    - 最大 MAX_POST_LENGTH 文字で途切れ防止
+    """
+    # URL を必ず末尾に付与
+    url = item.get("url", "")
+    url_block = f"\n{url}" if url else ""
 
+    body = summary.replace("\n", " ").strip() + url_block
+
+    # NVD/JVN は CVSS と CVE番号も末尾に追加
     if site["type"] in ("nvd_api", "jvn"):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
         base_text = (
-            f"{body}\n\n"
-            f"CVSS {score} | {severity}\n"
-            f"{item['id']}"
+            f"{body}\nCVSS {score} | {severity}\n{item['id']}"
         )
     else:
         base_text = body
 
+    # 最終安全トリム（X対応）
     return safe_truncate(base_text, MAX_POST_LENGTH)
 
 # =========================================================
@@ -191,6 +206,10 @@ def format_post(site, summary, item):
 # =========================================================
 
 def summarize(text, api_key, site_type=None):
+    """
+    - NVD/JVN: 脆弱性内容・影響・攻撃手法を必ず含め 80文字以内
+    - RSS: 事実のみ簡潔に 80文字以内
+    """
     client = genai.Client(api_key=api_key)
 
     if site_type in ("nvd_api", "jvn"):
@@ -222,6 +241,7 @@ def summarize(text, api_key, site_type=None):
             model="gemini-2.5-flash-lite",
             contents=prompt
         )
+        # 安全トリムで80文字程度に収める
         return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
     except Exception:
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
@@ -250,7 +270,7 @@ def fetch_rss(site, since, until):
         items.append({
             "id": entry.get("link"),
             "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
-            "url": entry.get("link"),
+            "url": entry.get("link"),  # URL を item に格納
             "entry_time": entry_time
         })
 
@@ -291,7 +311,7 @@ def fetch_nvd(site, start, end):
             "id": cid,
             "score": score,
             "text": desc,
-            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"  # URL を必ず格納
         })
 
     return items
@@ -323,7 +343,7 @@ def fetch_jvn(site, since, until):
             "id": cve_ids[0]["term"],
             "score": site.get("default_cvss", 0),
             "text": entry.get("summary", ""),
-            "url": entry.get("link"),
+            "url": entry.get("link"),  # URL を必ず格納
             "entry_time": entry_time
         })
 
@@ -365,6 +385,7 @@ def main():
         if not site.get("enabled"):
             continue
 
+        # state 正規化（posted_ids list → dict 等）
         site_state, migrated = normalize_site_state(
             site_key, state.get(site_key), now, MODE
         )
@@ -373,9 +394,9 @@ def main():
             state_dirty = True
 
         posted_ids = site_state["posted_ids"]
-
         last_checked = site_state.get("last_checked_at")
 
+        # 初回実行時は既存分スキップ
         if not last_checked:
             if skip_first and MODE == "prod":
                 site_state["last_checked_at"] = isoformat(now)
@@ -387,6 +408,7 @@ def main():
 
         until = now
 
+        # データ取得
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -401,24 +423,28 @@ def main():
             if cid in posted_ids:
                 continue
 
+            # 本文抽出 → 要約 → 投稿文生成
             trimmed = body_trim(item["text"], site_type=site["type"])
             summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
                 trimmed, gemini_key, site["type"]
             )
             post_text = format_post(site, summary, item)
 
+            # testモードではログ出力のみ
             if MODE == "test":
                 logging.info("[TEST]\n" + post_text)
                 continue
 
+            # 本番投稿
             post_bluesky(client, post_text, item["url"])
             posted_ids[cid] = isoformat(now)
             prune_posted_ids(posted_ids, now)
-            time.sleep(random.randint(30, 90))
+            time.sleep(random.randint(30, 90))  # 投稿間隔ランダム
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
+    # state 保存
     if MODE == "prod" and state_dirty:
         save_state(state)
 
