@@ -74,10 +74,10 @@ def body_trim(text, max_len=2500, site_type=None):
     """
     Gemini に渡す前の本文前処理
     - RSS: 従来通り
-    - NVD: 意味のある文のみ抽出
+    - NVD / JVN: 意味のある文を優先
     """
 
-    if site_type == "nvd_api":
+    if site_type in ("nvd_api", "jvn_rss"):
         lines = [
             l.strip()
             for l in text.splitlines()
@@ -90,6 +90,7 @@ def body_trim(text, max_len=2500, site_type=None):
         joined = " ".join(lines)
         return joined[:max_len]
 
+    # RSS
     lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
     trimmed = "\n".join(lines[:6])
     return trimmed[:max_len]
@@ -101,15 +102,21 @@ def body_trim(text, max_len=2500, site_type=None):
 def format_post(site, summary, url, item):
     body = summary.replace("\n", " ").strip()
 
-    if site["type"] == "nvd_api":
-        score = item.get("score", 0)
-        severity = cvss_to_severity(score)
-
-        base_text = (
-            f"{body}\n\n"
-            f"CVSS {score} | {severity}\n"
-            f"{item['id']}"
-        )
+    if site["type"] in ("nvd_api", "jvn_rss"):
+        score = item.get("score")
+        if score is not None:
+            severity = cvss_to_severity(score)
+            base_text = (
+                f"{body}\n\n"
+                f"CVSS {score} | {severity}\n"
+                f"{item['id']}"
+            )
+        else:
+            # JVN（CVSS 不明ケース）
+            base_text = (
+                f"{body}\n\n"
+                f"{item['id']}"
+            )
     else:
         base_text = body
 
@@ -125,17 +132,17 @@ def format_post(site, summary, url, item):
 def summarize(text, api_key, site_type=None, max_retries=3):
     client = genai.Client(api_key=api_key)
 
-    if site_type == "nvd_api":
+    if site_type in ("nvd_api", "jvn_rss"):
         prompt = f"""
-以下の観点を必ず含め、日本語80〜100文字で要約してください。
+以下を日本語80〜100文字で要約してください。
 
-- 何が問題か
-- 影響を受ける対象
-- 攻撃者が可能になる行為
+- 何の脆弱性か
+- どこに影響するか
+- 攻撃者が何をできるか
 
 注意:
-- CVE番号は本文に含めない
-- 不明な点は「可能性がある」と表現
+- CVE番号は含めない
+- 不明点は「可能性がある」と表現
 - 事実のみ
 
 {text}
@@ -166,11 +173,8 @@ def summarize(text, api_key, site_type=None, max_retries=3):
             else:
                 break
 
-    # --- fallback（分類しない・中立文） ---
-    return (
-        "当該ソフトウェアに関する脆弱性が報告されています。"
-        "影響範囲や悪用条件については現在確認中です。"
-    )
+    # fallback
+    return "脆弱性が確認されました。影響範囲や条件については現在調査中です。"
 
 # ==========================
 # RSS（時間軸対応）
@@ -230,7 +234,7 @@ def fetch_nvd(site, pub_start, pub_end):
         cve_id = cve.get("id")
         metrics = cve.get("metrics", {})
 
-        score = 0
+        score = None
         if "cvssMetricV31" in metrics:
             score = float(metrics["cvssMetricV31"][0]["cvssData"]["baseScore"])
         elif "cvssMetricV30" in metrics:
@@ -238,13 +242,11 @@ def fetch_nvd(site, pub_start, pub_end):
         elif "cvssMetricV2" in metrics:
             score = float(metrics["cvssMetricV2"][0]["cvssData"]["baseScore"])
 
-        if not cve_id or score < threshold:
+        if not cve_id or score is None or score < threshold:
             continue
 
-        description = ""
         descs = cve.get("descriptions", [])
-        if descs:
-            description = descs[0].get("value", "")
+        description = descs[0].get("value", "") if descs else ""
 
         items.append({
             "id": cve_id,
@@ -254,6 +256,49 @@ def fetch_nvd(site, pub_start, pub_end):
         })
 
     return items
+
+# ==========================
+# JVN（RSS）
+# ==========================
+
+def fetch_jvn(site, since, until):
+    feed = feedparser.parse(site["url"])
+    items = []
+
+    for entry in feed.entries:
+        published = entry.get("published_parsed")
+        if not published:
+            continue
+
+        entry_time = datetime.fromtimestamp(
+            time.mktime(published),
+            tz=timezone.utc
+        )
+
+        if not (since < entry_time <= until):
+            continue
+
+        title = entry.get("title", "")
+        summary = entry.get("summary", "")
+        text = f"{title}\n{summary}"
+
+        cve_id = None
+        for token in text.replace(",", " ").split():
+            if token.startswith("CVE-"):
+                cve_id = token.strip()
+                break
+
+        if not cve_id:
+            continue
+
+        items.append({
+            "id": cve_id,
+            "text": text,
+            "url": entry.get("link"),
+            "entry_time": entry_time
+        })
+
+    return items[: site.get("max_items", 1)]
 
 # ==========================
 # Bluesky 投稿
@@ -339,6 +384,10 @@ def main():
         raw = state.get(site_key)
 
         if isinstance(raw, list):
+            logging.info(
+                f"Migrate state [{site_key}]: list → dict"
+                + (" (TEST: not saved)" if MODE == "test" else "")
+            )
             state[site_key] = {
                 "last_checked_at": None,
                 "posted_ids": raw
@@ -351,6 +400,7 @@ def main():
 
         if not last_checked:
             if skip_first:
+                logging.info(f"{site_key}: initial run → skip existing")
                 site_state["last_checked_at"] = isoformat(now)
                 if MODE == "prod":
                     state_dirty = True
@@ -365,10 +415,13 @@ def main():
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
             items = fetch_nvd(site, since, until)
+        elif site["type"] == "jvn_rss":
+            items = fetch_jvn(site, since, until)
         else:
             continue
 
         if not items:
+            logging.info(f"{site_key}: no new items")
             if MODE == "prod":
                 site_state["last_checked_at"] = isoformat(now)
                 state_dirty = True
@@ -380,7 +433,8 @@ def main():
                 body_trim(item["text"], site_type=site["type"]),
                 site["type"]
             )
-            logging.info("[TEST]\n" + format_post(site, summary, item["url"], item))
+            post_text = format_post(site, summary, item["url"], item)
+            logging.info("[TEST]\n" + post_text)
             continue
 
         for item in items:
@@ -388,11 +442,8 @@ def main():
                 body_trim(item["text"], site_type=site["type"]),
                 site["type"]
             )
-            post_bluesky(
-                client,
-                format_post(site, summary, item["url"], item),
-                item["url"]
-            )
+            post_text = format_post(site, summary, item["url"], item)
+            post_bluesky(client, post_text, item["url"])
             time.sleep(random.randint(30, 90))
 
         site_state["last_checked_at"] = isoformat(now)
