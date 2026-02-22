@@ -146,13 +146,9 @@ def format_post(site, summary, url, item):
     if site["type"] == "nvd_api":
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-        vuln_type = classify_vuln_type(body)
 
-        # タイトルから CVE を排除
-        title = f"[{severity}] {vuln_type}の脆弱性"
-
+        # タイトルは完全に廃止
         base_text = (
-            f"{title}\n\n"
             f"{body}\n\n"
             f"CVSS {score} | {severity}\n"
             f"{item['id']}"
