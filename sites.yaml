@@ -37,6 +37,16 @@ sites:
 
 
   # ------------------------------------------
+  # NetSecurity
+  # ------------------------------------------
+  netsecurity:
+    enabled: true
+    type: rss
+    url: "https://netsecurity.ne.jp/rss/index.rdf"
+    max_items: 5    # ← 取得は複数OK（stateで制御）
+
+
+  # ------------------------------------------
   # NVD (National Vulnerability Database)
   # ------------------------------------------
   nvd:
@@ -57,11 +67,3 @@ sites:
     max_items: 5
 
 
-  # ------------------------------------------
-  # NetSecurity
-  # ------------------------------------------
-  netsecurity:
-    enabled: false
-    type: rss
-    url: "https://netsecurity.ne.jp/rss/index.rdf"
-    max_items: 5    # ← 取得は複数OK（stateで制御）
