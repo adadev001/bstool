@@ -67,14 +67,12 @@ def normalize_site_state(site_key, raw_state, now, mode):
     """
     migrated = False
 
-    # --- 完全未定義 ---
     if raw_state is None:
         return {
             "last_checked_at": None,
             "posted_ids": {}
         }, False
 
-    # --- 旧形式: list ---
     if isinstance(raw_state, list):
         logging.info(
             f"Migrate state [{site_key}]: list → dict"
@@ -85,7 +83,6 @@ def normalize_site_state(site_key, raw_state, now, mode):
             "posted_ids": {cid: isoformat(now) for cid in raw_state}
         }, True
 
-    # --- dict だが posted_ids が list ---
     posted = raw_state.get("posted_ids")
     if isinstance(posted, list):
         raw_state["posted_ids"] = {
@@ -93,7 +90,6 @@ def normalize_site_state(site_key, raw_state, now, mode):
         }
         migrated = True
 
-    # --- posted_ids 未定義 ---
     raw_state.setdefault("posted_ids", {})
 
     return raw_state, migrated
@@ -107,7 +103,8 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
     - 保持期間超過削除
     - 件数上限超過時の古い順削除
     """
-    # --- 時間減衰 ---
+    before = len(posted_ids)
+
     cutoff = now - timedelta(days=POSTED_ID_RETENTION_DAYS)
     expired = [
         cid for cid, ts in posted_ids.items()
@@ -116,7 +113,6 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
     for cid in expired:
         del posted_ids[cid]
 
-    # --- 件数上限 ---
     if len(posted_ids) > POSTED_ID_MAX:
         logging.warning(
             f"posted_ids exceeded max ({POSTED_ID_MAX}), trimming old entries"
@@ -127,6 +123,8 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
         )
         for cid, _ in sorted_items[:-POSTED_ID_MAX]:
             del posted_ids[cid]
+
+    return before - len(posted_ids)
 
 # =========================================================
 # 共通ユーティリティ
@@ -147,11 +145,6 @@ def cvss_to_severity(score: float) -> str:
 # =========================================================
 
 def body_trim(text, max_len=2500, site_type=None):
-    """
-    Gemini に渡す前の本文前処理
-    - RSS: 見出し＋冒頭段落
-    - NVD / JVN: 意味のある文のみ抽出
-    """
     if site_type in ("nvd_api", "jvn"):
         lines = [
             l.strip()
@@ -168,7 +161,7 @@ def body_trim(text, max_len=2500, site_type=None):
     return "\n".join(lines[:6])[:max_len]
 
 # =========================================================
-# 投稿文生成（NVD / JVN タイトル廃止版）
+# 投稿文生成
 # =========================================================
 
 def format_post(site, summary, item):
@@ -231,7 +224,7 @@ def summarize(text, api_key, site_type=None):
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
 
 # =========================================================
-# RSS 取得
+# fetch / post
 # =========================================================
 
 def fetch_rss(site, since, until):
@@ -259,10 +252,6 @@ def fetch_rss(site, since, until):
         })
 
     return items[: site.get("max_items", 1)]
-
-# =========================================================
-# NVD 取得
-# =========================================================
 
 def fetch_nvd(site, start, end):
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -304,13 +293,8 @@ def fetch_nvd(site, start, end):
 
     return items
 
-# =========================================================
-# JVN 取得
-# =========================================================
-
 def fetch_jvn(site, since, until):
-    url = site["url"]
-    feed = feedparser.parse(url)
+    feed = feedparser.parse(site["url"])
     items = []
 
     for entry in feed.entries:
@@ -342,10 +326,6 @@ def fetch_jvn(site, since, until):
 
     return items[: site.get("max_items", 1)]
 
-# =========================================================
-# Bluesky 投稿
-# =========================================================
-
 def post_bluesky(client, text, url):
     client.send_post(text=text)
 
@@ -365,7 +345,7 @@ def main():
     skip_first = settings.get("skip_existing_on_first_run", True)
 
     original_state = load_state()
-    state = json.loads(json.dumps(original_state))  # deep copy
+    state = json.loads(json.dumps(original_state))
     state_dirty = False
 
     now = utc_now()
@@ -382,13 +362,18 @@ def main():
         if not site.get("enabled"):
             continue
 
-        raw_state = state.get(site_key)
         site_state, migrated = normalize_site_state(
-            site_key, raw_state, now, MODE
+            site_key, state.get(site_key), now, MODE
         )
         state[site_key] = site_state
         if migrated and MODE == "prod":
             state_dirty = True
+
+        posted_ids = site_state["posted_ids"]
+        before_count = len(posted_ids)
+
+        if site["type"] in ("nvd_api", "jvn"):
+            logging.info(f"{site_key}: posted_ids count = {before_count}")
 
         last_checked = site_state.get("last_checked_at")
 
@@ -404,7 +389,6 @@ def main():
 
         until = now
 
-        # ---------- fetch ----------
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -421,7 +405,6 @@ def main():
                 state_dirty = True
             continue
 
-        # ---------- test ----------
         if MODE == "test":
             item = items[0]
             trimmed = body_trim(item["text"], site_type=site["type"])
@@ -432,12 +415,12 @@ def main():
             logging.info("[TEST]\n" + post_text)
             continue
 
-        # ---------- prod ----------
+        added = 0
+        removed = 0
+
         for item in items:
             cid = item.get("id")
-            posted_ids = site_state["posted_ids"]
 
-            # CVE 重複防止
             if cid in posted_ids:
                 logging.info(f"{site_key}: skip duplicate {cid}")
                 continue
@@ -449,12 +432,19 @@ def main():
             post_bluesky(client, post_text, item["url"])
 
             posted_ids[cid] = isoformat(now)
-            prune_posted_ids(posted_ids, now)
+            added += 1
+            removed += prune_posted_ids(posted_ids, now)
 
             time.sleep(random.randint(30, 90))
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
+
+        if site["type"] in ("nvd_api", "jvn"):
+            total = len(posted_ids)
+            logging.info(
+                f"{site_key}: posted_ids delta (+{added} / -{removed}) → total={total}"
+            )
 
     if MODE == "prod" and state_dirty:
         save_state(state)
