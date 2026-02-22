@@ -66,22 +66,97 @@ def cvss_to_severity(score):
     else:
         return "LOW"
 
-def body_trim(text, max_len=2500):
+# ==========================
+# NVD 脆弱性タイプ分類
+# ==========================
+
+def classify_vuln_type(text: str) -> str:
     """
-    Gemini に渡す前の本文前処理（常時実行）
+    NVD / JVD 共通で使える軽量分類器
     """
+    t = text.lower()
+
+    if any(k in t for k in [
+        "remote code execution",
+        "arbitrary code execution",
+        "execute arbitrary code",
+        "code execution"
+    ]):
+        return "任意コード実行"
+
+    if any(k in t for k in [
+        "denial of service",
+        "dos",
+        "service crash"
+    ]):
+        return "サービス拒否（DoS）"
+
+    if any(k in t for k in [
+        "information disclosure",
+        "information leak",
+        "leak",
+        "expose sensitive"
+    ]):
+        return "情報漏えい"
+
+    if any(k in t for k in [
+        "privilege escalation",
+        "elevation of privilege"
+    ]):
+        return "権限昇格"
+
+    return "セキュリティ上の問題"
+
+# ==========================
+# 本文前処理
+# ==========================
+
+def body_trim(text, max_len=2500, site_type=None):
+    """
+    Gemini に渡す前の本文前処理
+    - RSS: 従来通り
+    - NVD: 意味のある文のみ抽出
+    """
+
+    if site_type == "nvd_api":
+        lines = [
+            l.strip()
+            for l in text.splitlines()
+            if any(k in l.lower() for k in [
+                "allow", "allows", "could", "can",
+                "vulnerability", "attack", "execute",
+                "disclosure", "denial"
+            ])
+        ]
+        joined = " ".join(lines)
+        return joined[:max_len]
+
+    # RSS / その他
     lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
     trimmed = "\n".join(lines[:6])
     return trimmed[:max_len]
+
+# ==========================
+# 投稿文生成
+# ==========================
 
 def format_post(site, summary, url, item):
     body = summary.replace("\n", " ").strip()
 
     if site["type"] == "nvd_api":
-        cve_id = item["id"]
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
-        base_text = f"{cve_id}\nCVSS {score} | {severity}\n\n{body}"
+        vuln_type = classify_vuln_type(body)
+
+        # タイトルから CVE を排除
+        title = f"[{severity}] {vuln_type}の脆弱性"
+
+        base_text = (
+            f"{title}\n\n"
+            f"{body}\n\n"
+            f"CVSS {score} | {severity}\n"
+            f"{item['id']}"
+        )
     else:
         base_text = body
 
@@ -94,10 +169,27 @@ def format_post(site, summary, url, item):
 # Gemini 要約
 # ==========================
 
-def summarize(text, api_key, max_retries=3):
+def summarize(text, api_key, site_type=None, max_retries=3):
     client = genai.Client(api_key=api_key)
 
-    prompt = f"""
+    # --- NVD 専用指示 ---
+    if site_type == "nvd_api":
+        prompt = f"""
+以下の観点を必ず含め、日本語80〜100文字で要約してください。
+
+- 脆弱性の種類
+- 影響を受ける対象
+- 攻撃者が可能になる行為
+
+注意:
+- CVE番号は本文に含めない
+- 不明な点は「可能性がある」と表現
+- 事実のみ
+
+{text}
+"""
+    else:
+        prompt = f"""
 以下を日本語で簡潔に要約してください。
 事実のみ。
 誇張なし。
@@ -120,9 +212,11 @@ def summarize(text, api_key, max_retries=3):
             if attempt < max_retries - 1:
                 time.sleep(random.randint(30, 90))
             else:
-                raise
+                break
 
-    return text[:100]
+    # --- fallback（LLM失敗時） ---
+    vuln_type = classify_vuln_type(text)
+    return f"{vuln_type}に関する脆弱性が確認されました。影響範囲や条件については現在調査中です。"
 
 # ==========================
 # RSS（時間軸対応）
@@ -193,10 +287,16 @@ def fetch_nvd(site, pub_start, pub_end):
         if not cve_id or score < threshold:
             continue
 
+        # --- description を本文として使用 ---
+        description = ""
+        descs = cve.get("descriptions", [])
+        if descs:
+            description = descs[0].get("value", "")
+
         items.append({
             "id": cve_id,
             "score": score,
-            "text": cve_id,
+            "text": description,
             "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}"
         })
 
@@ -271,8 +371,8 @@ def main():
             os.environ.get("BLUESKY_PASSWORD"),
         )
 
-    def get_summary(text):
-        return text[:100] if force_test else summarize(text, gemini_key)
+    def get_summary(text, site_type):
+        return text[:100] if force_test else summarize(text, gemini_key, site_type)
 
     now = utc_now()
 
@@ -285,7 +385,7 @@ def main():
 
         raw = state.get(site_key)
 
-        # --- state 正規化（RSS / NVD 共通） ---
+        # --- state 正規化（list → dict） ---
         if isinstance(raw, list):
             logging.info(
                 f"Migrate state [{site_key}]: list → dict"
@@ -293,7 +393,7 @@ def main():
             )
             state[site_key] = {
                 "last_checked_at": None,
-                "posted_ids": raw
+                "posted_ids": raw  # 将来 JVD/NVD 重複防止用
             }
             if MODE == "prod":
                 state_dirty = True
@@ -332,14 +432,20 @@ def main():
         # ---------- TEST ----------
         if MODE == "test":
             item = items[0]
-            summary = get_summary(body_trim(item["text"]))
+            summary = get_summary(
+                body_trim(item["text"], site_type=site["type"]),
+                site["type"]
+            )
             post_text = format_post(site, summary, item["url"], item)
             logging.info("[TEST]\n" + post_text)
             continue
 
         # ---------- PROD ----------
         for item in items:
-            summary = get_summary(body_trim(item["text"]))
+            summary = get_summary(
+                body_trim(item["text"], site_type=site["type"]),
+                site["type"]
+            )
             post_text = format_post(site, summary, item["url"], item)
             post_bluesky(client, post_text, item["url"])
             time.sleep(random.randint(30, 90))
