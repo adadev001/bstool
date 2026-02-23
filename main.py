@@ -387,6 +387,7 @@ def main():
             items = fetch_nvd(site, since, until)
         elif site["type"] == "jvn":
             items = fetch_jvn(site, since, until)
+            logging.info(f"[{site_key}] JVN entries:{len(items)} since={since} until={until}")
         else:
             continue
 
