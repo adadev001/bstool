@@ -67,6 +67,7 @@ def normalize_site_state(site_key, raw_state, now, mode):
     """
     migrated = False
     if raw_state is None:
+        # 初回の場合は空の dict を返す
         return {"last_checked_at": None, "posted_ids": {}}, False
 
     if isinstance(raw_state, list):
@@ -78,6 +79,7 @@ def normalize_site_state(site_key, raw_state, now, mode):
 
     posted = raw_state.get("posted_ids")
     if isinstance(posted, list):
+        # list → dict に変換
         raw_state["posted_ids"] = {cid: isoformat(now) for cid in posted}
         migrated = True
 
@@ -341,6 +343,7 @@ def main():
     force_test = settings.get("force_test_mode", False)
     skip_first = settings.get("skip_existing_on_first_run", True)
 
+    # state 読み込み & ディープコピー
     original_state = load_state()
     state = json.loads(json.dumps(original_state))
     state_dirty = False
@@ -355,6 +358,7 @@ def main():
         if not site.get("enabled", False):
             continue
 
+        # state 正規化
         site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
         state[site_key] = site_state
         if migrated and MODE == "prod":
@@ -362,9 +366,22 @@ def main():
 
         posted_ids = site_state["posted_ids"]
         last_checked = site_state.get("last_checked_at")
-        since = parse_iso(last_checked) if last_checked else now - timedelta(days=1)
+
+        # =========================================================
+        # 修正: 初回スキップ判定
+        # - last_checked_at が None かつ skip_existing_on_first_run が True の場合
+        #   すべての取得アイテムをスキップ
+        # =========================================================
+        if last_checked:
+            since = parse_iso(last_checked)
+            skip_first_run = False
+        else:
+            since = now - timedelta(days=1)  # 仮取得範囲
+            skip_first_run = skip_first and MODE == "prod"
+
         until = now
 
+        # データ取得
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -374,10 +391,14 @@ def main():
         else:
             continue
 
-        if not items:
-            logging.info(f"No new items found for [{site_key}]")
+        # 初回スキップ処理
+        if skip_first_run:
+            logging.info(f"初回スキップ: {len(items)} items for [{site_key}]")
+            site_state["last_checked_at"] = isoformat(now)
+            state_dirty = True
             continue
 
+        # 各アイテム処理
         for item in items:
             cid = item.get("id")
             # 差分反映: RSS は CVE 既投稿チェック無効、JVN/NVD は既投稿チェック
