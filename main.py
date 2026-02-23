@@ -376,7 +376,7 @@ def main():
         if last_checked:
             since = parse_iso(last_checked)
         else:
-            since = now - timedelta(days=1)
+            since = now - timedelta(days=1) # daysで初回取得期間を設定（大きくすると件数が多くなる）
             first_skip = skip_first and MODE == "prod"
 
         until = now
