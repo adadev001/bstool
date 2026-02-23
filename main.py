@@ -67,7 +67,6 @@ def normalize_site_state(site_key, raw_state, now, mode):
     """
     migrated = False
     if raw_state is None:
-        # 完全初回
         return {"last_checked_at": None, "posted_ids": {}}, False
 
     if isinstance(raw_state, list):
@@ -109,10 +108,14 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
 # 共通ユーティリティ
 # =========================================================
 def cvss_to_severity(score: float) -> str:
-    if score >= 9.0: return "CRITICAL"
-    elif score >= 7.0: return "HIGH"
-    elif score >= 4.0: return "MEDIUM"
-    else: return "LOW"
+    if score >= 9.0:
+        return "CRITICAL"
+    elif score >= 7.0:
+        return "HIGH"
+    elif score >= 4.0:
+        return "MEDIUM"
+    else:
+        return "LOW"
 
 def safe_truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
@@ -124,9 +127,8 @@ def safe_truncate(text: str, limit: int) -> str:
 # =========================================================
 def body_trim(text, max_len=2500, site_type=None):
     """
-    本文抽出・前処理
     - NVD/JVN は脆弱性関連文のみ抽出
-    - RSS は最初の6行程度を抽出
+    - RSS は最初の数行を抽出
     """
     if site_type in ("nvd_api", "jvn"):
         lines = [
@@ -148,14 +150,11 @@ def body_trim(text, max_len=2500, site_type=None):
 # =========================================================
 def is_cve_already_posted(cid, site_type, state):
     """
-    RSS: CVE 重複チェックを行わない
-    JVN / NVD: NVD state に既に存在する CVE はスキップ
+    RSS: CVE はチェックしない
+    JVN / NVD: NVD 側で既投稿の CVE はスキップ
     """
-    if not cid:
+    if not cid or site_type == "rss":
         return False
-    if site_type == "rss":
-        return False
-
     posted_ids = state.get("nvd", {}).get("posted_ids", {})
     return cid in posted_ids
 
@@ -163,11 +162,6 @@ def is_cve_already_posted(cid, site_type, state):
 # 投稿文生成
 # =========================================================
 def format_post(site, summary, item):
-    """
-    - RSS: summary のみ
-    - NVD/JVN: summary + CVE + CVSS
-    - 本文には URL を含めない（embed 用）
-    """
     summary_text = safe_truncate(summary.replace("\n", " "), MAX_POST_LENGTH)
 
     if site["type"] in ("nvd_api", "jvn"):
@@ -184,7 +178,8 @@ def format_post(site, summary, item):
 def summarize(text, api_key, site_type=None):
     client = genai.Client(api_key=api_key)
 
-    prompt = f"""
+    prompt = (
+        """
 以下の観点を必ず含め、日本語80文字以内で要約してください。
 
 - 脆弱性の内容
@@ -195,15 +190,14 @@ def summarize(text, api_key, site_type=None):
 - CVE番号は含めない
 - 不明点は「可能性がある」と表現
 - 事実のみ
-
-{text}
-""" if site_type in ("nvd_api", "jvn") else f"""
+"""
+        if site_type in ("nvd_api", "jvn")
+        else """
 以下を日本語で簡潔に要約してください。
 事実のみ。誇張なし。
 80文字以内。
-
-{text}
 """
+    ) + f"\n{text}"
 
     try:
         resp = client.models.generate_content(
@@ -212,11 +206,10 @@ def summarize(text, api_key, site_type=None):
         )
         return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
     except Exception:
-        logging.error("Gemini summarize failed")
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
 
 # =========================================================
-# データ取得
+# データ取得（RSS / NVD / JVN）
 # =========================================================
 def fetch_rss(site, since=None, until=None):
     feed = feedparser.parse(site["url"])
@@ -305,10 +298,6 @@ def fetch_jvn(site, since, until):
 # Bluesky 投稿
 # =========================================================
 def post_bluesky(client, text, url):
-    """
-    - 本文に URL は含めない
-    - embed 失敗時のみ本文末尾に URL を付与
-    """
     try:
         resp = requests.get("https://cardyb.bsky.app/v1/extract", params={"url": url}, timeout=10)
         card = resp.json()
@@ -367,26 +356,22 @@ def main():
         if not site.get("enabled", False):
             continue
 
-        # -----------------------------------------------------
-        # cron 実行前提：サイト処理開始区切りログ
-        # -----------------------------------------------------
+        # =========================================================
+        # cron 実行前提：サイト開始区切りログ
+        # =========================================================
         logging.info(f"[{site_key}] ---")
 
-        # -----------------------------------------------------
-        # site ローカル実行サマリ用カウンタ
-        # state には保存しない（1実行限定）
-        # -----------------------------------------------------
+        # site 単位ローカルカウンタ（state には保存しない）
         fetched_count = 0
         posted_count = 0
         cve_skip_count = 0
-        initial_skip = False
+        first_skip = False
 
         site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
         state[site_key] = site_state
         if migrated and MODE == "prod":
             state_dirty = True
 
-        posted_ids = site_state["posted_ids"]
         last_checked = site_state.get("last_checked_at")
 
         if last_checked:
@@ -409,68 +394,60 @@ def main():
 
         fetched_count = len(items)
 
-        # -----------------------------------------------------
-        # 初回スキップ（挙動変更なし／文言整理）
-        # -----------------------------------------------------
         if skip_first_run:
-            initial_skip = True
-            logging.info(
-                f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ"
-            )
+            logging.info(f"[{site_key}] 初回実行のため既存記事 {fetched_count} 件をスキップ")
             site_state["last_checked_at"] = isoformat(now)
             state_dirty = True
-            # サマリログはこの後まとめて出す
-        else:
-            for item in items:
-                cid = item.get("id")
+            continue
 
-                if is_cve_already_posted(cid, site["type"], state):
-                    cve_skip_count += 1
-                    logging.info(f"既投稿 CVE スキップ: {cid} [{site_key}]")
-                    continue
+        for item in items:
+            cid = item.get("id")
 
-                trimmed = body_trim(item["text"], site_type=site["type"])
-                summary = (
-                    trimmed[:SUMMARY_HARD_LIMIT]
-                    if force_test
-                    else summarize(trimmed, gemini_key, site["type"])
-                )
+            if is_cve_already_posted(cid, site["type"], state):
+                cve_skip_count += 1
+                logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
+                continue
 
-                post_text = format_post(site, summary, item)
+            trimmed = body_trim(item["text"], site_type=site["type"])
+            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
+            post_text = format_post(site, summary, item)
 
-                if MODE == "test":
-                    logging.info("[TEST]\n" + post_text + f"\nEmbed URL: {item['url']}")
-                else:
-                    post_bluesky(client, post_text, item["url"])
-                    time.sleep(random.randint(30, 90))
-
-                posted_count += 1
-
-                # RSS は posted_ids 管理しない
-                if cid and site["type"] != "rss":
-                    state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
-                    logging.info(f"posted_id 追加: {cid}")
-                    pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
-                    if pruned > 0:
-                        logging.info(f"posted_id prune: {pruned} 件")
-
-        # -----------------------------------------------------
-        # 「新規記事なし」ログ（items 空 or 全件スキップ）
-        # -----------------------------------------------------
-        if fetched_count == 0 or (fetched_count > 0 and posted_count == 0 and not initial_skip):
-            if site["type"] == "rss":
-                logging.info(f"[{site_key}] スキップ：新規記事なし")
+            if MODE == "test":
+                logging.info("[TEST]\n" + post_text + f"\nEmbed URL: {item['url']}")
             else:
-                logging.info(f"[{site_key}] スキップ：新規CVEsなし")
+                post_bluesky(client, post_text, item["url"])
+                time.sleep(random.randint(30, 90))
 
-        # -----------------------------------------------------
-        # site 単位サマリログ
-        # RSS では CVE スキップ件数を表示しない
-        # -----------------------------------------------------
+            posted_count += 1
+
+            if cid and site["type"] != "rss":
+                state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
+                logging.info(f"posted_id 追加: {cid}")
+                pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
+                if pruned > 0:
+                    logging.info(f"Pruned {pruned} old posted_ids")
+
+        # =========================================================
+        # 案B：JVN 専用スキップ理由ログ
+        # =========================================================
+        if (
+            site["type"] == "jvn"
+            and fetched_count > 0
+            and posted_count == 0
+            and cve_skip_count > 0
+        ):
+            logging.info(f"[{site_key}] スキップ：NVD既投稿CVEのみ（{cve_skip_count}件）")
+
+        # 新規記事なしログ
+        if fetched_count == 0 or posted_count == 0:
+            if site["type"] == "nvd_api":
+                logging.info(f"[{site_key}] スキップ：新規CVEsなし")
+            else:
+                logging.info(f"[{site_key}] スキップ：新規記事なし")
+
+        # サイト単位サマリログ
         if site["type"] == "rss":
-            logging.info(
-                f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count}"
-            )
+            logging.info(f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count}")
         else:
             logging.info(
                 f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count} / CVEスキップ:{cve_skip_count}"
