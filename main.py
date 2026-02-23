@@ -219,6 +219,7 @@ def summarize(text, api_key, site_type=None):
         )
         return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
     except Exception:
+        logging.error("Gemini API error", exc_info=True)
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
 
 # =========================================================
@@ -358,6 +359,15 @@ def main():
         if not site.get("enabled", False):
             continue
 
+        # =====================================================
+        # site 単位の実行結果サマリ用ローカルカウンタ
+        # （state には保存しない／この実行中のみ使用）
+        # =====================================================
+        fetched_count = 0          # 取得したアイテム数
+        posted_count = 0           # 実際に投稿した件数
+        skipped_cve_count = 0      # CVE 重複によりスキップした件数
+        first_run_skipped = False  # 初回スキップを行ったかどうか
+
         # state 正規化
         site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
         state[site_key] = site_state
@@ -391,18 +401,29 @@ def main():
         else:
             continue
 
+        fetched_count = len(items)
+
         # 初回スキップ処理
         if skip_first_run:
-            logging.info(f"初回スキップ: {len(items)} items for [{site_key}]")
+            first_run_skipped = True
+            logging.info(
+                f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ"
+            )
             site_state["last_checked_at"] = isoformat(now)
             state_dirty = True
             continue
 
+        # items が 0 件の場合は明示的にログを出す
+        if not items:
+            logging.info(f"[{site_key}] スキップ：新規記事なし")
+
         # 各アイテム処理
         for item in items:
             cid = item.get("id")
+
             # 差分反映: RSS は CVE 既投稿チェック無効、JVN/NVD は既投稿チェック
             if is_cve_already_posted(cid, site["type"], state):
+                skipped_cve_count += 1
                 logging.info(f"既投稿 CVE スキップ: {cid} [{site_key}]")
                 continue
 
@@ -416,12 +437,20 @@ def main():
                 post_bluesky(client, post_text, item["url"])
                 time.sleep(random.randint(30, 90))
 
+            posted_count += 1
+
             # RSS は posted_ids 管理しない、JVN/NVD のみ追加
             if cid and site["type"] != "rss":
                 state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
+                logging.info(f"posted_id 追加: {cid}")
                 pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
                 if pruned > 0:
                     logging.info(f"Pruned {pruned} old posted_ids for [{site_key}]")
+
+        # site 処理完了後のサマリログ（prod / test 共通）
+        logging.info(
+            f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count} / CVEスキップ:{skipped_cve_count}"
+        )
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
