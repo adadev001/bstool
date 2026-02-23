@@ -13,7 +13,6 @@ from datetime import datetime, timedelta, timezone
 # =========================================================
 # 定数定義
 # =========================================================
-
 SITES_FILE = "sites.yaml"             # サイト設定ファイル
 STATE_FILE = "processed_urls.json"    # 投稿済み管理ファイル
 MAX_POST_LENGTH = 140                 # 投稿本文の最大文字数（X移植前提）
@@ -24,7 +23,6 @@ POSTED_ID_MAX = 1000                  # posted_id の最大件数
 # =========================================================
 # 時刻ユーティリティ
 # =========================================================
-
 def utc_now():
     """UTC現在時刻を返す"""
     return datetime.now(timezone.utc)
@@ -40,7 +38,6 @@ def parse_iso(ts: str) -> datetime:
 # =========================================================
 # 設定 / state 読み込み
 # =========================================================
-
 def load_config():
     with open(SITES_FILE, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
@@ -62,7 +59,6 @@ def save_state(state):
 # =========================================================
 # state 正規化（後方互換対応）
 # =========================================================
-
 def normalize_site_state(site_key, raw_state, now, mode):
     """
     - list形式だった posted_ids を dict に変換
@@ -111,7 +107,6 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
 # =========================================================
 # 共通ユーティリティ
 # =========================================================
-
 def cvss_to_severity(score: float) -> str:
     """CVSS スコアから重大度文字列を返す"""
     if score >= 9.0: return "CRITICAL"
@@ -128,7 +123,6 @@ def safe_truncate(text: str, limit: int) -> str:
 # =========================================================
 # 本文前処理
 # =========================================================
-
 def body_trim(text, max_len=2500, site_type=None):
     """
     本文抽出・前処理
@@ -150,14 +144,29 @@ def body_trim(text, max_len=2500, site_type=None):
     return "\n".join(lines[:6])[:max_len]
 
 # =========================================================
+# CVE 既投稿チェック（差分反映）
+# =========================================================
+def is_cve_already_posted(cid, site_type, state):
+    """
+    RSS: CVE はチェックしない
+    JVN / NVD: 既投稿 CVE はスキップ
+    """
+    if not cid:
+        return False
+    if site_type == "rss":
+        return False
+    # JVN / NVD
+    posted_ids = state.get("nvd", {}).get("posted_ids", {})
+    return cid in posted_ids
+
+# =========================================================
 # 投稿文生成
 # =========================================================
-
 def format_post(site, summary, item):
     """
-    - RSS: summary
+    - RSS: summary のみ
     - NVD/JVN: summary + CVE+CVSS
-    - URL は本文には含めず、embed に渡す
+    - 本文には URL は含めない
     """
     summary_text = safe_truncate(summary.replace("\n", " "), MAX_POST_LENGTH)
 
@@ -174,7 +183,6 @@ def format_post(site, summary, item):
 # =========================================================
 # Gemini 要約
 # =========================================================
-
 def summarize(text, api_key, site_type=None):
     """
     - NVD/JVN: 脆弱性内容・影響・攻撃手法を必ず含め 80文字以内
@@ -214,7 +222,6 @@ def summarize(text, api_key, site_type=None):
 # =========================================================
 # データ取得
 # =========================================================
-
 def fetch_rss(site, since=None, until=None):
     feed = feedparser.parse(site["url"])
     items = []
@@ -286,12 +293,12 @@ def fetch_jvn(site, since, until):
             "text": entry.get("summary", ""),
             "url": entry.get("link")
         })
+
     return items[: site.get("max_items", 1)]
 
 # =========================================================
 # Bluesky 投稿
 # =========================================================
-
 def post_bluesky(client, text, url):
     """
     - 本文に URL は含めず、embed に渡す
@@ -324,7 +331,6 @@ def post_bluesky(client, text, url):
 # =========================================================
 # main
 # =========================================================
-
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
     config = load_config()
@@ -374,7 +380,9 @@ def main():
 
         for item in items:
             cid = item.get("id")
-            if cid in posted_ids:
+            # 差分反映: RSS は CVE 既投稿チェック無効、JVN/NVD は既投稿チェック
+            if is_cve_already_posted(cid, site["type"], state):
+                logging.info(f"既投稿 CVE スキップ: {cid} [{site_key}]")
                 continue
 
             trimmed = body_trim(item["text"], site_type=site["type"])
@@ -382,15 +390,17 @@ def main():
             post_text = format_post(site, summary, item)
 
             if MODE == "test":
-                logging.info("[TEST]\n" + post_text + f"\n{item['url']}")
+                logging.info("[TEST]\n" + post_text + f"\nEmbed URL: {item['url']}")
             else:
                 post_bluesky(client, post_text, item["url"])
                 time.sleep(random.randint(30, 90))
 
-            posted_ids[cid] = isoformat(now)
-            pruned = prune_posted_ids(posted_ids, now)
-            if pruned > 0:
-                logging.info(f"Pruned {pruned} old posted_ids for [{site_key}]")
+            # RSS は posted_ids 管理しない、JVN/NVD のみ追加
+            if cid and site["type"] != "rss":
+                state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
+                pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
+                if pruned > 0:
+                    logging.info(f"Pruned {pruned} old posted_ids for [{site_key}]")
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
