@@ -360,16 +360,22 @@ def main():
         # cron 実行前提：サイト開始区切りログ
         # =========================================================
         logging.info(f"[{site_key}] ---")
+        # tryはデバッグ以降のインデント１つ下げてる
+        try:
+            fetched_count = 0
+            posted_count = 0
+            cve_skip_count = 0
+            first_skip = False
 
-        fetched_count = 0
-        posted_count = 0
-        cve_skip_count = 0
-        first_skip = False
-
-        site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
-        state[site_key] = site_state
-        if migrated and MODE == "prod":
-            state_dirty = True
+            site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
+            state[site_key] = site_state
+            if migrated and MODE == "prod":
+                state_dirty = True
+        # state処理デバッグ
+        except Exception as e:
+            logging.exception(f"[{site_key}] site 処理中に例外発生")
+            raise
+        # ここまで
 
         last_checked = site_state.get("last_checked_at")
 
