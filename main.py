@@ -361,7 +361,6 @@ def main():
         # =========================================================
         logging.info(f"[{site_key}] ---")
 
-        # site 単位ローカルカウンタ（state には保存しない）
         fetched_count = 0
         posted_count = 0
         cve_skip_count = 0
@@ -376,10 +375,9 @@ def main():
 
         if last_checked:
             since = parse_iso(last_checked)
-            skip_first_run = False
         else:
             since = now - timedelta(days=1)
-            skip_first_run = skip_first and MODE == "prod"
+            first_skip = skip_first and MODE == "prod"
 
         until = now
 
@@ -394,38 +392,39 @@ def main():
 
         fetched_count = len(items)
 
-        if skip_first_run:
+        # =========================================================
+        # ★ 今回の反映ポイント ★
+        # 初回スキップでも continue せず、後続のログ・state 更新を必ず通す
+        # =========================================================
+        if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {fetched_count} 件をスキップ")
-            site_state["last_checked_at"] = isoformat(now)
-            state_dirty = True
-            continue
+        else:
+            for item in items:
+                cid = item.get("id")
 
-        for item in items:
-            cid = item.get("id")
+                if is_cve_already_posted(cid, site["type"], state):
+                    cve_skip_count += 1
+                    logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
+                    continue
 
-            if is_cve_already_posted(cid, site["type"], state):
-                cve_skip_count += 1
-                logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
-                continue
+                trimmed = body_trim(item["text"], site_type=site["type"])
+                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
+                post_text = format_post(site, summary, item)
 
-            trimmed = body_trim(item["text"], site_type=site["type"])
-            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
-            post_text = format_post(site, summary, item)
+                if MODE == "test":
+                    logging.info("[TEST]\n" + post_text + f"\nEmbed URL: {item['url']}")
+                else:
+                    post_bluesky(client, post_text, item["url"])
+                    time.sleep(random.randint(30, 90))
 
-            if MODE == "test":
-                logging.info("[TEST]\n" + post_text + f"\nEmbed URL: {item['url']}")
-            else:
-                post_bluesky(client, post_text, item["url"])
-                time.sleep(random.randint(30, 90))
+                posted_count += 1
 
-            posted_count += 1
-
-            if cid and site["type"] != "rss":
-                state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
-                logging.info(f"posted_id 追加: {cid}")
-                pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
-                if pruned > 0:
-                    logging.info(f"Pruned {pruned} old posted_ids")
+                if cid and site["type"] != "rss":
+                    state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
+                    logging.info(f"posted_id 追加: {cid}")
+                    pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
+                    if pruned > 0:
+                        logging.info(f"Pruned {pruned} old posted_ids")
 
         # =========================================================
         # 案B：JVN 専用スキップ理由ログ
@@ -445,7 +444,7 @@ def main():
             else:
                 logging.info(f"[{site_key}] スキップ：新規記事なし")
 
-        # サイト単位サマリログ
+        # サイト単位サマリログ（JVN も必ず出る）
         if site["type"] == "rss":
             logging.info(f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count}")
         else:
@@ -453,6 +452,10 @@ def main():
                 f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count} / CVEスキップ:{cve_skip_count}"
             )
 
+        # =========================================================
+        # ★ 今回の反映ポイント ★
+        # JVN を含め、結果に関係なく必ず last_checked_at を更新
+        # =========================================================
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
