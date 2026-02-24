@@ -31,7 +31,7 @@ sites:
   securitynext:
     display_name: Security NEXT
     type: rss
-    url: https://www.security-next.com/feed
+    url: https://www.security-next.com　　#URL修正 /feed
     enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
@@ -42,7 +42,7 @@ sites:
   netsecurity:
     enabled: true
     type: rss
-    url: "https://netsecurity.ne.jp/rss/index.rdf"
+    url: https://netsecurity.ne.jp # URL修正 /rss/index.rdf"
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
 
