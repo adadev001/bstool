@@ -31,7 +31,8 @@ sites:
   securitynext:
     display_name: Security NEXT
     type: rss
-    url: https://www.security-next.com　　#　URL修正 /feed
+    url: https://www.security-next.com
+    # URL修正 /feed
     enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
@@ -40,9 +41,11 @@ sites:
   # NetSecurity
   # ------------------------------------------
   netsecurity:
-    enabled: true
+    display_name: Net Security
     type: rss
-    url: https://netsecurity.ne.jp # URL修正 /rss/index.rdf"
+    url: https://netsecurity.ne.jp
+    # URL修正 /rss/index.rdf"
+    enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
 
@@ -61,9 +64,10 @@ sites:
   # jvn
   # ------------------------------------------
   jvn:
-    enabled: true
+    display_name: JVN
     type: jvn_rss
     url: https://jvndb.jvn.jp/apis/myjvn?method=getVulnOverviewList&feed=hnd
+    enabled: true
     max_items: 5
 
 
