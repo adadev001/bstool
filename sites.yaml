@@ -31,7 +31,7 @@ sites:
   securitynext:
     display_name: Security NEXT
     type: rss
-    url: https://www.security-next.com　　#URL修正 /feed
+    url: https://www.security-next.com　　#　URL修正 /feed
     enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
