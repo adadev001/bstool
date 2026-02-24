@@ -26,25 +26,23 @@ sites:
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
   # ------------------------------------------
-  # Security NEXT
+  # BleepingComputer
   # ------------------------------------------
-  securitynext:
-    display_name: Security NEXT
+  BleepingComputer:
+    display_name: BleepingComputer
     type: rss
-    url: https://www.security-next.com
-    # URL修正 /feed
+    url: https://www.bleepingcomputer.com/feed/
     enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
 
   # ------------------------------------------
-  # NetSecurity
+  # SecurityWeek
   # ------------------------------------------
-  netsecurity:
+  SecurityWeek:
     display_name: Net Security
     type: rss
-    url: https://netsecurity.ne.jp
-    # URL修正 /rss/index.rdf"
+    url: https://www.securityweek.com/feed/
     enabled: true
     max_items: 5    # ← 取得は複数OK（stateで制御）
 
