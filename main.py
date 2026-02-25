@@ -19,14 +19,8 @@ MAX_POST_LENGTH = 140                 # 投稿本文の最大文字数（X移植
 SUMMARY_HARD_LIMIT = 80               # 要約文字数の安全上限
 POSTED_ID_RETENTION_DAYS = 30         # posted_id の保持日数
 POSTED_ID_MAX = 1000                  # posted_id の最大件数
-
-# =========================================================
-# ★ 429 対応追加 ★
-# Gemini の Rate Limit を検出するための専用例外
-# この例外が出たサイトは「その場で処理中断」する
-# =========================================================
-class GeminiRateLimitError(Exception):
-    pass
+MAX_RETRIES = 3                        # 429対応リトライ回数
+RETRY_DELAY = 5                         # 429リトライ間隔（秒）
 
 # =========================================================
 # 時刻ユーティリティ
@@ -189,9 +183,11 @@ def summarize(text, api_key, site_type=None):
     prompt = (
         """
 以下の観点を必ず含め、日本語80文字以内で要約してください。
+
 - 脆弱性の内容
 - 影響を受ける対象
 - 攻撃者が可能になる行為
+
 注意:
 - CVE番号は含めない
 - 不明点は「可能性がある」と表現
@@ -206,34 +202,146 @@ def summarize(text, api_key, site_type=None):
     ) + f"\n{text}"
 
     try:
-        time.sleep(random.uniform(0.5, 1.5))
         resp = client.models.generate_content(
             model="gemini-2.5-flash-lite",
             contents=prompt
         )
         return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
-
-    except Exception as e:
-        msg = str(e)
-
-        # =====================================================
-        # ★ 429 対応追加 ★
-        # 429 が出たら即例外送出（サイト単位で処理中断）
-        # =====================================================
-        if "429" in msg:
-            logging.error("Gemini 429 (rate limit) detected")
-            raise GeminiRateLimitError()
-
-        logging.error(f"Gemini summarize failed: {e}")
+    except Exception:
         return "セキュリティ上の問題に関する脆弱性が確認されています。"
+
+# =========================================================
+# HTTP GET with 429 retry 対応
+# =========================================================
+def requests_get_with_retry(url, params=None, timeout=30):
+    """GET リクエストで 429 が返ったらリトライ"""
+    for attempt in range(1, MAX_RETRIES + 1):
+        resp = requests.get(url, params=params, timeout=timeout)
+        if resp.status_code != 429:
+            return resp
+        logging.warning(f"429 Too Many Requests: retry {attempt}/{MAX_RETRIES} after {RETRY_DELAY}s")
+        time.sleep(RETRY_DELAY)
+    resp.raise_for_status()
+    return resp
 
 # =========================================================
 # データ取得（RSS / NVD / JVN）
 # =========================================================
-# ※ ここ以降は変更なし（省略せずそのまま）
-# fetch_rss / fetch_nvd / fetch_jvn / post_bluesky
+def fetch_rss(site, since=None, until=None):
+    feed = feedparser.parse(site["url"])
+    items = []
+
+    for entry in feed.entries[: site.get("max_items", 1)]:
+        published = entry.get("published_parsed")
+        if published and since and until:
+            entry_time = datetime.fromtimestamp(time.mktime(published), tz=timezone.utc)
+            if not (since < entry_time <= until):
+                continue
+
+        items.append({
+            "id": entry.get("link"),
+            "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
+            "url": entry.get("link"),
+        })
+
+    return items
+
+def fetch_nvd(site, start, end):
+    url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    params = {
+        "resultsPerPage": site.get("max_items", 50),
+        "pubStartDate": isoformat(start),
+        "pubEndDate": isoformat(end),
+    }
+
+    # =========================================================
+    # ★ 429 対応反映箇所 ★
+    # =========================================================
+    resp = requests_get_with_retry(url, params=params, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    threshold = float(site.get("cvss_threshold", 0))
+    items = []
+
+    for v in data.get("vulnerabilities", []):
+        cve = v.get("cve", {})
+        cid = cve.get("id")
+        metrics = cve.get("metrics", {})
+        score = 0
+
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if key in metrics:
+                score = float(metrics[key][0]["cvssData"]["baseScore"])
+                break
+
+        if not cid or score < threshold:
+            continue
+
+        desc = cve.get("descriptions", [{}])[0].get("value", "")
+        items.append({
+            "id": cid,
+            "score": score,
+            "text": desc,
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"
+        })
+
+    return items
+
+def fetch_jvn(site, since, until):
+    feed = feedparser.parse(site["url"])
+    items = []
+
+    for entry in feed.entries:
+        if not entry.get("published_parsed"):
+            continue
+
+        entry_time = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+        if not (since < entry_time <= until):
+            continue
+
+        cve_ids = [t for t in entry.get("tags", []) if t.get("term", "").startswith("CVE-")]
+        if not cve_ids:
+            continue
+
+        items.append({
+            "id": cve_ids[0]["term"],
+            "score": site.get("default_cvss", 0),
+            "text": entry.get("summary", ""),
+            "url": entry.get("link")
+        })
+
+    return items[: site.get("max_items", 1)]
+
 # =========================================================
-# （※ あなたが貼ってくれたコードと完全一致のため省略せずそのまま）
+# Bluesky 投稿
+# =========================================================
+def post_bluesky(client, text, url):
+    try:
+        resp = requests.get("https://cardyb.bsky.app/v1/extract", params={"url": url}, timeout=10)
+        card = resp.json()
+
+        image_blob = None
+        image_url = card.get("image")
+        if image_url:
+            img = requests.get(image_url, timeout=10)
+            if img.status_code == 200 and len(img.content) < 1_000_000:
+                upload = client.upload_blob(img.content)
+                image_blob = upload.blob
+
+        embed = models.AppBskyEmbedExternal.Main(
+            external=models.AppBskyEmbedExternal.External(
+                uri=url,
+                title=card.get("title", ""),
+                description=card.get("description", ""),
+                thumb=image_blob
+            )
+        )
+        client.send_post(text=text, embed=embed)
+
+    except Exception as e:
+        logging.warning(f"Embed failed: {e}")
+        client.send_post(text=text + f"\n{url}")
 
 # =========================================================
 # main
@@ -268,10 +376,7 @@ def main():
             continue
 
         logging.info(f"[{site_key}] ---")
-
-        # ★ 429 対応追加：サイト単位フラグ
-        site_rate_limited = False
-
+ 
         fetched_count = 0
         posted_count = 0
         cve_skip_count = 0
@@ -286,10 +391,9 @@ def main():
 
         if last_checked:
             since = parse_iso(last_checked)
-            skip_first_run = False
         else:
             since = now - timedelta(days=1)
-            skip_first_run = skip_first and MODE == "prod"
+            first_skip = skip_first and MODE == "prod"
 
         until = now
 
@@ -297,21 +401,17 @@ def main():
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
             items = fetch_nvd(site, since, until)
-        elif site["type"] == "jvn":
+        elif site["type"] in ("jvn", "jvn_rss"):
             items = fetch_jvn(site, since, until)
         else:
             continue
 
         fetched_count = len(items)
 
-        if skip_first_run:
+        if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {fetched_count} 件をスキップ")
-            site_state["last_checked_at"] = isoformat(now)
-            state_dirty = True
-            continue
-
-        for item in items:
-            try:
+        else:
+            for item in items:
                 cid = item.get("id")
 
                 if is_cve_already_posted(cid, site["type"], state):
@@ -320,9 +420,7 @@ def main():
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
-                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
-                    trimmed, gemini_key, site["type"]
-                )
+                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
                 post_text = format_post(site, summary, item)
 
                 if MODE == "test":
@@ -340,22 +438,6 @@ def main():
                     if pruned > 0:
                         logging.info(f"Pruned {pruned} old posted_ids")
 
-            except GeminiRateLimitError:
-                # =================================================
-                # ★ 429 対応追加 ★
-                # このサイトの処理を即中断し、
-                # last_checked_at を更新しない
-                # =================================================
-                logging.error(f"[{site_key}] Gemini 429 によりサイト処理中断")
-                site_rate_limited = True
-                break
-
-        # ★ 429 発生時は last_checked_at を進めない
-        if site_rate_limited:
-            logging.warning(f"[{site_key}] last_checked_at は更新されません")
-            continue
-
-        # ---- 以降は元コードそのまま ----
         if (
             site["type"] == "jvn"
             and fetched_count > 0
