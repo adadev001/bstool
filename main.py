@@ -21,17 +21,6 @@ POSTED_ID_RETENTION_DAYS = 30         # posted_id の保持日数
 POSTED_ID_MAX = 1000                  # posted_id の最大件数
 
 # =========================================================
-# ★ 今回の反映ポイント ★
-# Gemini 429（レートリミット）検出専用の軽量例外
-#
-# 目的:
-# - 429 が出た瞬間に「そのサイト単位で処理を止める」
-# - last_checked_at を更新せず、次回同じ地点から再開する
-# =========================================================
-class GeminiRateLimitError(Exception):
-    pass
-
-# =========================================================
 # 時刻ユーティリティ
 # =========================================================
 def utc_now():
@@ -74,17 +63,12 @@ def normalize_site_state(site_key, raw_state, now, mode):
     """
     - list形式だった posted_ids を dict に変換
     - last_checked_at が未設定の場合は初期値 None
-    - モードによってログだけにする場合あり
     """
     migrated = False
     if raw_state is None:
         return {"last_checked_at": None, "posted_ids": {}}, False
 
     if isinstance(raw_state, list):
-        logging.info(
-            f"Migrate state [{site_key}]: list → dict"
-            + (" (TEST: not saved)" if mode == "test" else "")
-        )
         return {"last_checked_at": None, "posted_ids": {cid: isoformat(now) for cid in raw_state}}, True
 
     posted = raw_state.get("posted_ids")
@@ -108,7 +92,6 @@ def prune_posted_ids(posted_ids: dict, now: datetime):
         del posted_ids[cid]
 
     if len(posted_ids) > POSTED_ID_MAX:
-        logging.warning(f"posted_ids exceeded max ({POSTED_ID_MAX}), trimming old entries")
         sorted_items = sorted(posted_ids.items(), key=lambda x: parse_iso(x[1]))
         for cid, _ in sorted_items[:-POSTED_ID_MAX]:
             del posted_ids[cid]
@@ -137,10 +120,6 @@ def safe_truncate(text: str, limit: int) -> str:
 # 本文前処理
 # =========================================================
 def body_trim(text, max_len=2500, site_type=None):
-    """
-    - NVD/JVN は脆弱性関連文のみ抽出
-    - RSS は最初の数行を抽出
-    """
     if site_type in ("nvd_api", "jvn"):
         lines = [
             l.strip()
@@ -160,10 +139,6 @@ def body_trim(text, max_len=2500, site_type=None):
 # CVE 既投稿チェック
 # =========================================================
 def is_cve_already_posted(cid, site_type, state):
-    """
-    RSS: CVE はチェックしない
-    JVN / NVD: NVD 側で既投稿の CVE はスキップ
-    """
     if not cid or site_type == "rss":
         return False
     posted_ids = state.get("nvd", {}).get("posted_ids", {})
@@ -190,11 +165,10 @@ def summarize(text, api_key, site_type=None):
     """
     Gemini 要約処理
 
-    ★ 今回の反映ポイント（案A + 案B + 案C）
-    - 案A: 呼び出し前にランダムジッターを入れて 429 回避
-    - 案B: 503 の場合のみ 1 回だけリトライ
-    - ★ 429 は即例外送出（サイト単位で処理を止めるため）
-    - 案C: 429 以外の失敗時のみフォールバック文言
+    ★ 429対応まとめ
+    - 呼び出し前ジッター
+    - 429 / 503 のみ 1回リトライ
+    - 失敗時は必ずフォールバック文言を返す
     """
 
     client = genai.Client(api_key=api_key)
@@ -222,33 +196,151 @@ def summarize(text, api_key, site_type=None):
 
     for attempt in (1, 2):
         try:
+            # === 429対応 追加：事前ジッター ===
             time.sleep(random.uniform(0.5, 1.5))
 
             resp = client.models.generate_content(
                 model="gemini-2.5-flash-lite",
                 contents=prompt
             )
-
             return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
 
         except Exception as e:
             msg = str(e)
 
-            # ★ 429 は即サイト停止トリガー
-            if "429" in msg:
-                logging.error("Gemini summarize hit 429 (rate limit)")
-                raise GeminiRateLimitError()
-
-            # 503 のみ 1 回リトライ
-            if attempt == 1 and "503" in msg:
-                logging.warning("Gemini summarize retry due to 503")
+            # === 429 / 503 のみ 1回だけリトライ ===
+            if attempt == 1 and ("429" in msg or "503" in msg):
+                logging.warning("Gemini summarize retry due to 429/503")
                 time.sleep(2)
                 continue
 
             logging.error(f"Gemini summarize failed: {e}")
             break
 
+    # === フォールバック（必ず文字列を返す） ===
     return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
+
+# =========================================================
+# データ取得（RSS / NVD / JVN）
+# =========================================================
+def fetch_rss(site, since=None, until=None):
+    feed = feedparser.parse(site["url"])
+    items = []
+
+    for entry in feed.entries[: site.get("max_items", 1)]:
+        published = entry.get("published_parsed")
+        if published and since and until:
+            entry_time = datetime.fromtimestamp(time.mktime(published), tz=timezone.utc)
+            if not (since < entry_time <= until):
+                continue
+
+        items.append({
+            "id": entry.get("link"),
+            "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
+            "url": entry.get("link"),
+        })
+
+    return items
+
+def fetch_nvd(site, start, end):
+    url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    params = {
+        "resultsPerPage": site.get("max_items", 50),
+        "pubStartDate": isoformat(start),
+        "pubEndDate": isoformat(end),
+    }
+
+    resp = requests.get(url, params=params, timeout=30)
+
+    # === 429対応 追加：NVD側で429が出たら今回はスキップ ===
+    if resp.status_code == 429:
+        logging.warning("NVD API rate limited (429), skipping this cycle")
+        return []
+
+    resp.raise_for_status()
+    data = resp.json()
+
+    threshold = float(site.get("cvss_threshold", 0))
+    items = []
+
+    for v in data.get("vulnerabilities", []):
+        cve = v.get("cve", {})
+        cid = cve.get("id")
+        metrics = cve.get("metrics", {})
+        score = 0
+
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if key in metrics:
+                score = float(metrics[key][0]["cvssData"]["baseScore"])
+                break
+
+        if not cid or score < threshold:
+            continue
+
+        desc = cve.get("descriptions", [{}])[0].get("value", "")
+        items.append({
+            "id": cid,
+            "score": score,
+            "text": desc,
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"
+        })
+
+    return items
+
+def fetch_jvn(site, since, until):
+    feed = feedparser.parse(site["url"])
+    items = []
+
+    for entry in feed.entries:
+        if not entry.get("published_parsed"):
+            continue
+
+        entry_time = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+        if not (since < entry_time <= until):
+            continue
+
+        cve_ids = [t for t in entry.get("tags", []) if t.get("term", "").startswith("CVE-")]
+        if not cve_ids:
+            continue
+
+        items.append({
+            "id": cve_ids[0]["term"],
+            "score": site.get("default_cvss", 0),
+            "text": entry.get("summary", ""),
+            "url": entry.get("link")
+        })
+
+    return items[: site.get("max_items", 1)]
+
+# =========================================================
+# Bluesky 投稿
+# =========================================================
+def post_bluesky(client, text, url):
+    try:
+        resp = requests.get("https://cardyb.bsky.app/v1/extract", params={"url": url}, timeout=10)
+        card = resp.json()
+
+        image_blob = None
+        image_url = card.get("image")
+        if image_url:
+            img = requests.get(image_url, timeout=10)
+            if img.status_code == 200 and len(img.content) < 1_000_000:
+                upload = client.upload_blob(img.content)
+                image_blob = upload.blob
+
+        embed = models.AppBskyEmbedExternal.Main(
+            external=models.AppBskyEmbedExternal.External(
+                uri=url,
+                title=card.get("title", ""),
+                description=card.get("description", ""),
+                thumb=image_blob
+            )
+        )
+        client.send_post(text=text, embed=embed)
+
+    except Exception as e:
+        logging.warning(f"Embed failed: {e}")
+        client.send_post(text=text + f"\n{url}")
 
 # =========================================================
 # main
@@ -289,9 +381,6 @@ def main():
         cve_skip_count = 0
         first_skip = False
 
-        # ★ サイト単位で 429 が出たかどうかのフラグ
-        site_rate_limited = False
-
         site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
         state[site_key] = site_state
         if migrated and MODE == "prod":
@@ -322,46 +411,27 @@ def main():
             logging.info(f"[{site_key}] 初回実行のため既存記事 {fetched_count} 件をスキップ")
         else:
             for item in items:
-                try:
-                    cid = item.get("id")
+                cid = item.get("id")
 
-                    if is_cve_already_posted(cid, site["type"], state):
-                        cve_skip_count += 1
-                        logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
-                        continue
+                if is_cve_already_posted(cid, site["type"], state):
+                    cve_skip_count += 1
+                    continue
 
-                    trimmed = body_trim(item["text"], site_type=site["type"])
-                    summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
-                        trimmed, gemini_key, site["type"]
-                    )
-                    post_text = format_post(site, summary, item)
+                trimmed = body_trim(item["text"], site_type=site["type"])
+                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
+                post_text = format_post(site, summary, item)
 
-                    if MODE == "test":
-                        logging.info("[TEST]\n" + post_text + f"\nEmbed URL: {item['url']}")
-                    else:
-                        post_bluesky(client, post_text, item["url"])
-                        time.sleep(random.randint(30, 90))
+                if MODE == "test":
+                    logging.info("[TEST]\n" + post_text)
+                else:
+                    post_bluesky(client, post_text, item["url"])
+                    time.sleep(random.randint(30, 90))
 
-                    posted_count += 1
+                posted_count += 1
 
-                    if cid and site["type"] != "rss":
-                        state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
-                        logging.info(f"posted_id 追加: {cid}")
-                        pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
-                        if pruned > 0:
-                            logging.info(f"Pruned {pruned} old posted_ids")
-
-                except GeminiRateLimitError:
-                    # ★ 429 発生時：
-                    # - そのサイトの処理を即中断
-                    # - last_checked_at を更新しない
-                    logging.error(f"[{site_key}] Gemini 429 detected, stop processing this site")
-                    site_rate_limited = True
-                    break
-
-        if site_rate_limited:
-            logging.warning(f"[{site_key}] last_checked_at not updated due to rate limit")
-            continue
+                if cid and site["type"] != "rss":
+                    state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
+                    prune_posted_ids(state["nvd"]["posted_ids"], now)
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
