@@ -148,17 +148,33 @@ def body_trim(text, max_len=2500, site_type=None):
     return "\n".join(lines[:6])[:max_len]
 
 # =========================================================
-# CVE 既投稿チェック
+# 既投稿チェック（RSS / NVD/JVN 共通化）
 # =========================================================
-def is_cve_already_posted(cid, site_type, state):
+def is_already_posted(cid_or_url, site_type, state):
     """
-    RSS: CVE はチェックしない
-    JVN / NVD: NVD 側で既投稿の CVE はスキップ
+    NVD/JVN: CVE ID
+    RSS: 記事 URL
     """
-    if not cid or site_type == "rss":
+    if not cid_or_url:
         return False
-    posted_ids = state.get("nvd", {}).get("posted_ids", {})
-    return cid in posted_ids
+    if site_type in ("nvd_api", "jvn"):
+        posted_ids = state.get("nvd", {}).get("posted_ids", {})
+    else:  # RSS
+        posted_ids = state.get(site_type, {}).get("posted_ids", {})
+    return cid_or_url in posted_ids
+
+# =========================================================
+# 投稿後 posted_ids 登録（RSS / NVD/JVN 共通化）
+# =========================================================
+def mark_posted(cid_or_url, site_type, state, now):
+    if site_type in ("nvd_api", "jvn"):
+        state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid_or_url] = isoformat(now)
+        pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
+    else:  # RSS
+        state.setdefault(site_type, {}).setdefault("posted_ids", {})[cid_or_url] = isoformat(now)
+        pruned = prune_posted_ids(state[site_type]["posted_ids"], now)
+    if pruned > 0:
+        logging.info(f"Pruned {pruned} old posted_ids")
 
 # =========================================================
 # 投稿文生成
@@ -412,11 +428,11 @@ def main():
             logging.info(f"[{site_key}] 初回実行のため既存記事 {fetched_count} 件をスキップ")
         else:
             for item in items:
-                cid = item.get("id")
+                cid_or_url = item.get("id") if site["type"] in ("nvd_api", "jvn") else item.get("url")
 
-                if is_cve_already_posted(cid, site["type"], state):
+                if is_already_posted(cid_or_url, site["type"], state):
                     cve_skip_count += 1
-                    logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
+                    logging.info(f"[{site_key}] 既投稿スキップ: {cid_or_url}")
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
@@ -430,13 +446,7 @@ def main():
                     time.sleep(random.randint(30, 90))
 
                 posted_count += 1
-
-                if cid and site["type"] != "rss":
-                    state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
-                    logging.info(f"posted_id 追加: {cid}")
-                    pruned = prune_posted_ids(state["nvd"]["posted_ids"], now)
-                    if pruned > 0:
-                        logging.info(f"Pruned {pruned} old posted_ids")
+                mark_posted(cid_or_url, site["type"], state, now)
 
         if (
             site["type"] == "jvn"
@@ -459,6 +469,7 @@ def main():
                 f"[{site_key}] 取得:{fetched_count} / 投稿:{posted_count} / CVEスキップ:{cve_skip_count}"
             )
 
+        # 成功したサイト単位で last_checked_at を更新
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
