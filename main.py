@@ -176,6 +176,15 @@ def format_post(site, summary, item):
 # Gemini 要約
 # =========================================================
 def summarize(text, api_key, site_type=None):
+    """
+    Gemini 要約処理
+
+    ★ 今回の反映ポイント（案A + 案B + 案C）
+    - 案A: 呼び出し前にランダムジッターを入れて 429 回避
+    - 案B: 429 / 503 の場合のみ 1 回だけリトライ
+    - 案C: 失敗時のフォールバック文言を「要約失敗」と明示
+    """
+
     client = genai.Client(api_key=api_key)
 
     prompt = (
@@ -199,15 +208,46 @@ def summarize(text, api_key, site_type=None):
 """
     ) + f"\n{text}"
 
-    try:
-        resp = client.models.generate_content(
-            model="gemini-2.5-flash-lite",
-            contents=prompt
-        )
-        return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
-    except Exception:
-        return "セキュリティ上の問題に関する脆弱性が確認されています。"
+    # -----------------------------------------------------
+    # 案B: 最大2回（初回 + リトライ1回）
+    # -----------------------------------------------------
+    for attempt in (1, 2):
+        try:
+            # -------------------------------------------------
+            # 案A: Gemini 呼び出し前ジッター
+            # 無料枠・並列実行時の 429 回避目的
+            # -------------------------------------------------
+            time.sleep(random.uniform(0.5, 1.5))
 
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt
+            )
+
+            return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
+
+        except Exception as e:
+            msg = str(e)
+
+            # -------------------------------------------------
+            # 案B: 429 / 503 のみ 1 回だけ再試行
+            # -------------------------------------------------
+            if attempt == 1 and ("429" in msg or "503" in msg):
+                logging.warning("Gemini summarize retry due to 429/503")
+                # 固定バックオフ（指数にはしない：事故防止）
+                time.sleep(2)
+                continue
+
+            # それ以外の例外、または再試行失敗
+            logging.error(f"Gemini summarize failed: {e}")
+            break
+
+    # -----------------------------------------------------
+    # 案C: フォールバック文言（異常系が分かる表現）
+    # -----------------------------------------------------
+    return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
+
+    
 # =========================================================
 # データ取得（RSS / NVD / JVN）
 # =========================================================
