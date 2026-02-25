@@ -23,7 +23,7 @@ sites:
     url: https://feeds.feedburner.com/TheHackersNews
     enabled: true
     # 初回と2回目以降で取得件数を分ける
-    max_items: 5    # ← 取得は複数OK（stateで制御）
+    max_items: 3    # ← 取得は複数OK（stateで制御）
 
   # ------------------------------------------
   # BleepingComputer
@@ -33,7 +33,7 @@ sites:
     type: rss
     url: https://www.bleepingcomputer.com/feed/
     enabled: true
-    max_items: 5    # ← 取得は複数OK（stateで制御）
+    max_items: 3    # ← 取得は複数OK（stateで制御）
 
 
   # ------------------------------------------
@@ -44,7 +44,7 @@ sites:
     type: rss
     url: https://www.securityweek.com/feed/
     enabled: true
-    max_items: 5    # ← 取得は複数OK（stateで制御）
+    max_items: 3    # ← 取得は複数OK（stateで制御）
 
 
   # ------------------------------------------
@@ -55,7 +55,7 @@ sites:
     type: nvd_api
     enabled: true
     cvss_threshold: 7.0
-    max_items: 5
+    max_items: 3
 
 
   # ------------------------------------------
@@ -66,6 +66,6 @@ sites:
     type: jvn_rss
     url: https://jvndb.jvn.jp/apis/myjvn?method=getVulnOverviewList&feed=hnd
     enabled: true
-    max_items: 5
+    max_items: 3
 
 
