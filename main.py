@@ -68,9 +68,12 @@ def normalize_site_state(site_key, raw_state, now, mode, site_type):
     migrated = False
 
     if raw_state is None:
-        if site_type == "rss":
-            return {"last_checked_at": None}, False
-        return {"last_checked_at": None, "posted_ids": {}}, False
+        # 新規 state
+        state_base = {"last_checked_at": None}
+        if site_type not in ("rss",):
+            state_base["posted_ids"] = {}
+            state_base["retry_ids"] = {}  # retry 用辞書
+        return state_base, False
 
     # list → dict 移行（旧形式）
     if isinstance(raw_state, list):
@@ -80,7 +83,8 @@ def normalize_site_state(site_key, raw_state, now, mode, site_type):
         )
         return {
             "last_checked_at": None,
-            "posted_ids": {cid: isoformat(now) for cid in raw_state}
+            "posted_ids": {cid: isoformat(now) for cid in raw_state},
+            "retry_ids": {},
         }, True
 
     # RSS は posted_ids を削除
@@ -89,15 +93,20 @@ def normalize_site_state(site_key, raw_state, now, mode, site_type):
         raw_state.setdefault("last_checked_at", None)
         return raw_state, migrated
 
+    # posted_ids の list → dict 変換
     posted = raw_state.get("posted_ids")
     if isinstance(posted, list):
         raw_state["posted_ids"] = {cid: isoformat(now) for cid in posted}
         migrated = True
 
     raw_state.setdefault("posted_ids", {})
+    raw_state.setdefault("retry_ids", {})
     raw_state.setdefault("last_checked_at", None)
     return raw_state, migrated
 
+# =========================================================
+# posted_ids 管理
+# =========================================================
 def prune_posted_ids(posted_ids: dict, now: datetime):
     """
     - 保持期間超過の posted_id を削除
@@ -182,9 +191,9 @@ def format_post(site, summary, item):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
         cve_line = f"{item['id']} CVSS {score} | {severity}"
-        return f"{summary_text}\n{cve_line}"
+        return summary_text, cve_line
 
-    return summary_text
+    return summary_text, None
 
 # =========================================================
 # Gemini 要約
@@ -221,6 +230,7 @@ def summarize(text, api_key, site_type=None):
             logging.error(f"Gemini summarize failed: {e}")
             break
 
+    # フォールバック文言
     return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
 
 # =========================================================
@@ -282,10 +292,22 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿
+# Bluesky 投稿（embed 対応）
 # =========================================================
 def post_bluesky(client, text, url):
-    client.send_post(text=text + f"\n{url}")
+    """
+    - text は要約文
+    - url は embed 用
+    """
+    embed = models.AppBskyFeedPost(
+        text=text,
+        embed=models.AppBskyFeedPostEmbedExternal(
+            external=models.AppBskyFeedDefsExternal(
+                uri=url
+            )
+        )
+    )
+    client.send_post(embed)
 
 # =========================================================
 # main
@@ -337,38 +359,78 @@ def main():
 
         until = now
 
+        # データ取得
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
             items = fetch_nvd(site, since, until)
-        elif site["type"] in ("jvn", "jvn_rss"):
+        elif site["type"] == "jvn":
             items = fetch_jvn(site, since, until)
         else:
             continue
 
         if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ")
+            for item in items:
+                # 初回は retry 対象外
+                site_state.setdefault("retry_ids", {})[item["id"]] = {
+                    "status": "skipped",
+                    "last_attempt_at": isoformat(now),
+                    "retry_count": 0
+                }
         else:
             for item in items:
                 cid = item.get("id")
+                retry_entry = site_state.setdefault("retry_ids", {}).get(cid, {})
 
+                # 既投稿チェック
                 if is_cve_already_posted(cid, site["type"], state):
                     logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
+                    site_state["retry_ids"][cid] = {
+                        "status": "skipped",
+                        "last_attempt_at": isoformat(now),
+                        "retry_count": retry_entry.get("retry_count", 0)
+                    }
                     continue
 
+                # 本文前処理
                 trimmed = body_trim(item["text"], site_type=site["type"])
-                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
-                post_text = format_post(site, summary, item)
 
-                if MODE == "test":
-                    logging.info("[TEST]\n" + post_text)
-                else:
-                    post_bluesky(client, post_text, item["url"])
+                # 要約
+                summary = (
+                    trimmed[:SUMMARY_HARD_LIMIT]
+                    if force_test
+                    else summarize(trimmed, gemini_key, site["type"])
+                )
 
-                if cid and site["type"] != "rss":
+                post_text, cve_line = format_post(site, summary, item)
+                full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
+
+                try:
+                    if MODE == "test":
+                        logging.info("[TEST]\n" + full_text)
+                        post_status = "success"
+                    else:
+                        post_bluesky(client, post_text, item["url"])
+                        post_status = "success"
+                except Exception as e:
+                    logging.error(f"[{site_key}] 投稿失敗: {e}")
+                    post_status = "failed"
+
+                # state 更新（retry_ids）
+                retry_count = retry_entry.get("retry_count", 0)
+                site_state["retry_ids"][cid] = {
+                    "status": post_status,
+                    "last_attempt_at": isoformat(now),
+                    "retry_count": retry_count + 1
+                }
+
+                # posted_ids 更新（成功時のみ）
+                if post_status == "success" and cid and site["type"] != "rss":
                     state.setdefault("nvd", {}).setdefault("posted_ids", {})[cid] = isoformat(now)
                     prune_posted_ids(state["nvd"]["posted_ids"], now)
 
+        # 最終更新
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
