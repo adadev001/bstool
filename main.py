@@ -329,11 +329,11 @@ def main():
         last_checked = site_state.get("last_checked_at")
         first_skip = False
 
-        if last_checked:
-            since = parse_iso(last_checked)
-        else:
+        if last_checked is None:
             since = now - timedelta(days=1)
             first_skip = skip_first and MODE == "prod"
+        else:
+            since = parse_iso(last_checked)
 
         until = now
 
