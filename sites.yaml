@@ -63,7 +63,7 @@ sites:
   # ------------------------------------------
   jvn:
     display_name: JVN
-    type: jvn_rss
+    type: jvn
     url: https://jvndb.jvn.jp/apis/myjvn?method=getVulnOverviewList&feed=hnd
     enabled: true
     max_items: 3

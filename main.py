@@ -100,7 +100,7 @@ def cvss_to_severity(score: float) -> str:
 # 本文前処理
 # =========================================================
 def body_trim(text, max_len=2500, site_type=None):
-    if site_type in ("nvd_api", "jvn_rss"):
+    if site_type in ("nvd_api", "jvn"):
         lines = [
             l.strip()
             for l in text.splitlines()
@@ -121,7 +121,7 @@ def body_trim(text, max_len=2500, site_type=None):
 # =========================================================
 def format_post(site, summary, item):
     summary_text = safe_truncate(summary.replace("\n", " "), MAX_POST_LENGTH)
-    if site["type"] in ("nvd_api", "jvn_rss"):
+    if site["type"] in ("nvd_api", "jvn"):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
         cve_line = f"{item['id']} CVSS {score} | {severity}"
@@ -141,7 +141,7 @@ def summarize(text, api_key, site_type=None):
 - 攻撃者が可能になる行為
 ※ CVE番号は含めない
 """
-        if site_type in ("nvd_api", "jvn_rss")
+        if site_type in ("nvd_api", "jvn")
         else "以下を日本語で簡潔に要約してください。80文字以内。"
     ) + f"\n{text}"
 
@@ -210,46 +210,35 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿（正常投稿ロジック反映版）
+# Bluesky 投稿（最新 SDK 対応）修正版
 # =========================================================
 def post_bluesky(client, text, url, test_mode=False):
     """
-    ★ 昨日正常投稿できていたロジックを反映
-    - test_mode=True: 投稿せずログ出力
-    - test_mode=False: 最新 SDK でも send_post(text, embed) 形式で安全投稿
+    - test_mode=True: 投稿せずログ出力のみ
+    - test_mode=False: 実際に投稿
+    - 外部リンク embed 対応（最新 SDK）
     """
     if test_mode:
         logging.info("[TEST] 投稿内容:\n" + text + (f"\nURL: {url}" if url else ""))
         return
 
-    # 外部リンク embed を作成
-    embed = None
-    if url:
-        try:
-            resp = requests.get("https://cardyb.bsky.app/v1/extract", params={"url": url}, timeout=10)
-            card = resp.json()
-            image_blob = None
-            image_url = card.get("image")
-            if image_url:
-                img = requests.get(image_url, timeout=10)
-                if img.status_code == 200 and len(img.content) < 1_000_000:
-                    upload = client.upload_blob(img.content)
-                    image_blob = upload.blob
-            embed = models.AppBskyEmbedExternal.Main(
-                external=models.AppBskyEmbedExternal.External(
-                    uri=url,
-                    title=card.get("title", ""),
-                    description=card.get("description", ""),
-                    thumb=image_blob
-                )
-            )
-        except Exception as e:
-            logging.warning(f"Embed作成失敗: {e}")
-            embed = None
+    post_data = {
+        "text": text,
+        "embed": {
+            "$type": "app.bsky.embed.external",
+            "external": {
+                "uri": url
+            }
+        }
+    }
 
-    # ★ 安全な投稿: send_post を利用して旧ロジックを保持
     try:
-        client.send_post(text=text, embed=embed)
+        # 修正: 最新 SDK では record=post_data が必須
+        client.com.atproto.repo.create_record(
+            repo=client.me.did,                # 投稿先ユーザー DID
+            collection="app.bsky.feed.post",   # 投稿先コレクション
+            record=post_data                   # ここを data -> record に戻す
+        )
         logging.info("投稿成功")
     except Exception as e:
         logging.error(f"Bluesky 投稿失敗: {e}")
@@ -298,7 +287,7 @@ def main():
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
             items = fetch_nvd(site, since, until)
-        elif site["type"] == "jvn_rss":
+        elif site["type"] == "jvn":
             items = fetch_jvn(site, since, until)
         else:
             continue
@@ -307,24 +296,30 @@ def main():
         if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ")
             for item in items:
+                # 初回は retry 対象外
                 site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})[item["id"]] = {
                     "status": "skipped",
                     "last_attempt_at": isoformat(now),
                     "retry_count": 0
                 }
         else:
-            for item in items:
+            for idx, item in enumerate(items):
                 cid = item.get("id")
                 entry_dict = site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})
                 retry_entry = entry_dict.get(cid, {})
 
                 # CVE 系のみ既投稿チェック
-                if site["type"] in ("nvd_api", "jvn_rss") and retry_entry.get("status") == "success":
+                if site["type"] in ("nvd_api", "jvn") and retry_entry.get("status") == "success":
                     logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
+                # 修正: force_test=True の場合は要約を OFF にして投稿テスト可能
                 summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
+
+                # ===============================
+                # 追加: 投稿文生成・要約枠反映
+                # ===============================
                 post_text, cve_line = format_post(site, summary, item)
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
 
@@ -337,12 +332,21 @@ def main():
                     if summary.startswith("要約生成に失敗"):
                         post_status = "fallback"
 
+                # retry_ids / entries に投稿結果を登録
                 retry_count = retry_entry.get("retry_count", 0)
                 entry_dict[cid] = {
                     "status": post_status,
                     "last_attempt_at": isoformat(now),
                     "retry_count": retry_count + 1
                 }
+
+                # ===============================
+                # 追加: 投稿間隔ランダム待機（30〜90秒）
+                # ===============================
+                if idx < len(items) - 1:  # 最後の投稿のあとには待たない
+                    wait_time = random.randint(30, 90)
+                    logging.info(f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒")
+                    time.sleep(wait_time)
 
         # 最終更新
         site_state["last_checked_at"] = isoformat(now)
