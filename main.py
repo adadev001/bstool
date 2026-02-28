@@ -215,17 +215,28 @@ def fetch_jvn(site, since, until):
 # Bluesky 投稿
 # =========================================================
 def post_bluesky(client, text, url):
-    post = models.AppBskyFeedPost(
+    """
+    Bluesky 投稿処理
+
+    ・atproto SDK の AppBskyEmbedExternal は module 構造であり
+      callable なクラスではない
+    ・そのため SDK クラスを直接 new せず
+      AT Protocol Record を dict で明示的に渡す
+    ・この形式は SDK バージョン差分の影響を受けにくい
+    """
+    client.send_post(
         text=text,
-        embed=models.AppBskyEmbedExternal(
-            external=models.AppBskyEmbedExternal.External(
-                uri=url,
-                title=url,
-                description=""
-            )
-        )
+        embed={
+            "$type": "app.bsky.embed.external",
+            "external": {
+                "uri": url,
+                # title / description は必須ではないが
+                # 将来の拡張を考え、構造が分かるように明示
+                "title": "",
+                "description": ""
+            }
+        }
     )
-    client.send_post(post)
 
 # =========================================================
 # main
@@ -243,6 +254,7 @@ def main():
     now = utc_now()
     gemini_key = os.environ.get("GEMINI_API_KEY")
 
+    # prod のときのみ Bluesky にログイン
     if MODE == "prod":
         client = Client()
         client.login(
@@ -263,6 +275,8 @@ def main():
             site["type"]
         )
         state[site_key] = site_state
+        if migrated:
+            state_dirty = True
 
         last_checked = site_state.get("last_checked_at")
         first_skip = False
@@ -282,21 +296,85 @@ def main():
         else:
             continue
 
-        for item in items:
-            trimmed = body_trim(item["text"], site_type=site["type"])
-            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
-                trimmed, gemini_key, site["type"]
+        if first_skip:
+            logging.info(
+                f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ"
             )
+            for item in items:
+                site_state.setdefault(
+                    "entries" if site["type"] == "rss" else "retry_ids",
+                    {}
+                )[item["id"]] = {
+                    "status": "skipped",
+                    "last_attempt_at": isoformat(now),
+                    "retry_count": 0
+                }
+        else:
+            for idx, item in enumerate(items):
+                cid = item.get("id")
+                entry_dict = site_state.setdefault(
+                    "entries" if site["type"] == "rss" else "retry_ids",
+                    {}
+                )
+                retry_entry = entry_dict.get(cid, {})
 
-            post_text, cve_line = format_post(site, summary, item)
-            full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
+                if (
+                    site["type"] in ("nvd_api", "jvn")
+                    and retry_entry.get("status") == "success"
+                ):
+                    logging.info(
+                        f"[{site_key}] 既投稿 CVE スキップ: {cid}"
+                    )
+                    continue
 
-            if MODE == "test":
-                logging.info("[TEST] 投稿内容:")
-                logging.info(full_text)
-                logging.info(f"[TEST] URL: {item['url']}")
-            else:
-                post_bluesky(client, full_text, item["url"])
+                trimmed = body_trim(
+                    item["text"],
+                    site_type=site["type"]
+                )
+                summary = (
+                    trimmed[:SUMMARY_HARD_LIMIT]
+                    if force_test
+                    else summarize(trimmed, gemini_key, site["type"])
+                )
+
+                post_text, cve_line = format_post(site, summary, item)
+                full_text = (
+                    f"{post_text}\n{cve_line}"
+                    if cve_line
+                    else post_text
+                )
+
+                try:
+                    if MODE == "test":
+                        # test モードでは投稿しない
+                        # 設計どおり「生成結果の確認」のみ行う
+                        logging.info("[TEST] 投稿本文:")
+                        logging.info(full_text)
+                        logging.info(f"[TEST] URL: {item['url']}")
+                        post_status = "success"
+                    else:
+                        # prod のみ実投稿
+                        post_bluesky(client, full_text, item["url"])
+                        post_status = "success"
+                except Exception as e:
+                    logging.error(f"[{site_key}] 投稿失敗: {e}")
+                    post_status = "failed"
+                    if summary.startswith("要約生成に失敗"):
+                        post_status = "fallback"
+
+                retry_count = retry_entry.get("retry_count", 0)
+                entry_dict[cid] = {
+                    "status": post_status,
+                    "last_attempt_at": isoformat(now),
+                    "retry_count": retry_count + 1
+                }
+
+                if idx < len(items) - 1:
+                    wait_time = random.randint(30, 90)
+                    logging.info(
+                        f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒"
+                    )
+                    time.sleep(wait_time)
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
