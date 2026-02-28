@@ -210,16 +210,39 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿
+# Bluesky 投稿（最新 SDK 対応）
 # =========================================================
-def post_bluesky(client, text, url):
-    embed = models.AppBskyFeedPost(
-        text=text,
-        embed=models.AppBskyFeedPostEmbedExternal(
-            external=models.AppBskyFeedDefsExternal(uri=url)
+def post_bluesky(client, text, url, test_mode=False):
+    """
+    - test_mode=True: 投稿せずログ出力のみ
+    - test_mode=False: 実際に投稿
+    - 外部リンク embed 対応（最新 SDK）
+    """
+    if test_mode:
+        logging.info("[TEST] 投稿内容:\n" + text + (f"\nURL: {url}" if url else ""))
+        return
+
+    post_data = {
+        "text": text,
+        "embed": {
+            "$type": "app.bsky.embed.external",
+            "external": {
+                "uri": url
+            }
+        }
+    }
+
+    try:
+        # create_record で投稿
+        client.com.atproto.repo.create_record(
+            repo=client.me.did,
+            collection="app.bsky.feed.post",
+            record=post_data
         )
-    )
-    client.send_post(embed)
+        logging.info("投稿成功")
+    except Exception as e:
+        logging.error(f"Bluesky 投稿失敗: {e}")
+        raise
 
 # =========================================================
 # main
@@ -296,16 +319,11 @@ def main():
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
 
                 try:
-                    if MODE == "test":
-                        logging.info("[TEST]\n" + full_text)
-                        post_status = "success"
-                    else:
-                        post_bluesky(client, post_text, item["url"])
-                        post_status = "success"
+                    post_bluesky(client, full_text, item["url"], test_mode=(MODE=="test"))
+                    post_status = "success"
                 except Exception as e:
                     logging.error(f"[{site_key}] 投稿失敗: {e}")
                     post_status = "failed"
-                    # フォールバック文言の場合は retry に fallback として残す
                     if summary.startswith("要約生成に失敗"):
                         post_status = "fallback"
 
