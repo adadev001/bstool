@@ -100,7 +100,7 @@ def cvss_to_severity(score: float) -> str:
 # 本文前処理
 # =========================================================
 def body_trim(text, max_len=2500, site_type=None):
-    if site_type in ("nvd_api", "jvn"):
+    if site_type in ("nvd_api", "jvn_rss"):
         lines = [
             l.strip()
             for l in text.splitlines()
@@ -121,7 +121,7 @@ def body_trim(text, max_len=2500, site_type=None):
 # =========================================================
 def format_post(site, summary, item):
     summary_text = safe_truncate(summary.replace("\n", " "), MAX_POST_LENGTH)
-    if site["type"] in ("nvd_api", "jvn"):
+    if site["type"] in ("nvd_api", "jvn_rss"):
         score = item.get("score", 0)
         severity = cvss_to_severity(score)
         cve_line = f"{item['id']} CVSS {score} | {severity}"
@@ -141,7 +141,7 @@ def summarize(text, api_key, site_type=None):
 - 攻撃者が可能になる行為
 ※ CVE番号は含めない
 """
-        if site_type in ("nvd_api", "jvn")
+        if site_type in ("nvd_api", "jvn_rss")
         else "以下を日本語で簡潔に要約してください。80文字以内。"
     ) + f"\n{text}"
 
@@ -298,7 +298,7 @@ def main():
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
             items = fetch_nvd(site, since, until)
-        elif site["type"] == "jvn":
+        elif site["type"] == "jvn_rss":
             items = fetch_jvn(site, since, until)
         else:
             continue
