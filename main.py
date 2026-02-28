@@ -141,7 +141,10 @@ def summarize(text, api_key, site_type=None):
     for attempt in range(1, 4):
         try:
             time.sleep(random.uniform(0.5, 1.5))
-            resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash-lite",
+                contents=prompt
+            )
             return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
         except Exception as e:
             msg = str(e)
@@ -169,7 +172,11 @@ def fetch_rss(site, since=None, until=None):
 
 def fetch_nvd(site, start, end):
     url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-    params = {"resultsPerPage": site.get("max_items", 50), "pubStartDate": isoformat(start), "pubEndDate": isoformat(end)}
+    params = {
+        "resultsPerPage": site.get("max_items", 50),
+        "pubStartDate": isoformat(start),
+        "pubEndDate": isoformat(end)
+    }
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
@@ -190,7 +197,10 @@ def fetch_jvn(site, since, until):
     feed = feedparser.parse(site["url"])
     items = []
     for entry in feed.entries:
-        cve_ids = [t for t in entry.get("tags", []) if t.get("term", "").startswith("CVE-")]
+        cve_ids = [
+            t for t in entry.get("tags", [])
+            if t.get("term", "").startswith("CVE-")
+        ]
         if not cve_ids:
             continue
         items.append({
@@ -228,19 +238,27 @@ def main():
     state_dirty = False
     now = utc_now()
     gemini_key = os.environ.get("GEMINI_API_KEY")
+
     if MODE == "prod":
         client = Client()
-        client.login(os.environ["BLUESKY_IDENTIFIER"], os.environ["BLUESKY_PASSWORD"])
+        client.login(
+            os.environ["BLUESKY_IDENTIFIER"],
+            os.environ["BLUESKY_PASSWORD"]
+        )
 
     for site_key, site in sites.items():
         if not site.get("enabled"):
             continue
 
         logging.info(f"[{site_key}] ---")
-        site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE, site["type"])
+        site_state, migrated = normalize_site_state(
+            site_key,
+            state.get(site_key),
+            now,
+            MODE,
+            site["type"]
+        )
         state[site_key] = site_state
-        if migrated:
-            state_dirty = True
 
         last_checked = site_state.get("last_checked_at")
         first_skip = False
@@ -260,54 +278,21 @@ def main():
         else:
             continue
 
-        if first_skip:
-            logging.info(f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ")
-            for item in items:
-                site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})[item["id"]] = {
-                    "status": "skipped",
-                    "last_attempt_at": isoformat(now),
-                    "retry_count": 0
-                }
-        else:
-            for idx, item in enumerate(items):
-                cid = item.get("id")
-                entry_dict = site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})
-                retry_entry = entry_dict.get(cid, {})
+        for item in items:
+            trimmed = body_trim(item["text"], site_type=site["type"])
+            summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(
+                trimmed, gemini_key, site["type"]
+            )
 
-                if site["type"] in ("nvd_api", "jvn") and retry_entry.get("status") == "success":
-                    logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
-                    continue
+            post_text, cve_line = format_post(site, summary, item)
+            full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
 
-                trimmed = body_trim(item["text"], site_type=site["type"])
-                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
-
-                post_text, cve_line = format_post(site, summary, item)
-                full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
-
-                try:
-                    if MODE == "test":
-                        logging.info("[TEST] 投稿内容:\n%s", full_text)
-                        post_status = "success"
-                    else:
-                        post_bluesky(client, full_text, item["url"])
-                        post_status = "success"
-                except Exception as e:
-                    logging.error(f"[{site_key}] 投稿失敗: {e}")
-                    post_status = "failed"
-                    if summary.startswith("要約生成に失敗"):
-                        post_status = "fallback"
-
-                retry_count = retry_entry.get("retry_count", 0)
-                entry_dict[cid] = {
-                    "status": post_status,
-                    "last_attempt_at": isoformat(now),
-                    "retry_count": retry_count + 1
-                }
-
-                if idx < len(items) - 1:
-                    wait_time = random.randint(30, 90)
-                    logging.info(f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒")
-                    time.sleep(wait_time)
+            if MODE == "test":
+                logging.info("[TEST] 投稿内容:")
+                logging.info(full_text)
+                logging.info(f"[TEST] URL: {item['url']}")
+            else:
+                post_bluesky(client, full_text, item["url"])
 
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
