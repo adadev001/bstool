@@ -13,10 +13,10 @@ from datetime import datetime, timedelta, timezone
 # =========================================================
 # 定数定義
 # =========================================================
-SITES_FILE = "sites.yaml"             # サイト設定ファイル
-STATE_FILE = "processed_urls.json"    # 投稿済み管理ファイル
-MAX_POST_LENGTH = 140                 # 投稿本文の最大文字数（X移植前提）
-SUMMARY_HARD_LIMIT = 80               # 要約文字数の安全上限
+SITES_FILE = "sites.yaml"
+STATE_FILE = "processed_urls.json"
+MAX_POST_LENGTH = 140
+SUMMARY_HARD_LIMIT = 80
 
 # =========================================================
 # 時刻ユーティリティ
@@ -54,11 +54,6 @@ def save_state(state):
 # state 正規化
 # =========================================================
 def normalize_site_state(site_key, raw_state, now, mode, site_type):
-    """
-    - RSS は entries で投稿結果を管理
-    - CVE 系は retry_ids で投稿結果管理
-    - last_checked_at は常に進める
-    """
     migrated = False
     if raw_state is None:
         state_base = {"last_checked_at": None}
@@ -73,7 +68,6 @@ def normalize_site_state(site_key, raw_state, now, mode, site_type):
         raw_state.setdefault("entries", {})
         return raw_state, migrated
 
-    # CVE 系
     raw_state.setdefault("last_checked_at", None)
     raw_state.setdefault("retry_ids", {})
     return raw_state, migrated
@@ -112,7 +106,6 @@ def body_trim(text, max_len=2500, site_type=None):
         ]
         return " ".join(lines)[:max_len]
 
-    # RSS は最初の数行を抽出
     lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
     return "\n".join(lines[:6])[:max_len]
 
@@ -145,7 +138,6 @@ def summarize(text, api_key, site_type=None):
         else "以下を日本語で簡潔に要約してください。80文字以内。"
     ) + f"\n{text}"
 
-    # --- FIX / NEW ---: 429/503 retry
     for attempt in range(1, 4):
         try:
             time.sleep(random.uniform(0.5, 1.5))
@@ -155,11 +147,10 @@ def summarize(text, api_key, site_type=None):
             msg = str(e)
             if attempt < 3 and ("429" in msg or "503" in msg):
                 logging.warning("Gemini summarize retry due to 429/503")
-                time.sleep(5 * attempt)  # wait longer on repeated failure
+                time.sleep(5 * attempt)
                 continue
             logging.error(f"Gemini summarize failed: {e}")
             break
-    # フォールバック文言
     return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
 
 # =========================================================
@@ -211,13 +202,14 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿（最新 SDK 対応）修正版
+# Bluesky 投稿（修正済み） --- 修正箇所コメント付き
 # =========================================================
 def post_bluesky(client, text, url, test_mode=False):
     """
     - test_mode=True: 投稿せずログ出力のみ
     - test_mode=False: 実際に投稿
-    - 外部リンク embed 対応（最新 SDK）
+    - 外部リンク embed 対応
+    - 【修正コメント】最新 SDK 対応で record=post_data に統一
     """
     if test_mode:
         logging.info("[TEST] 投稿内容:\n" + text + (f"\nURL: {url}" if url else ""))
@@ -234,17 +226,17 @@ def post_bluesky(client, text, url, test_mode=False):
     }
 
     try:
-        # --- FIX / NEW ---: 最新 SDK に合わせ record=post_data
+        # 修正済み: record に統一
         client.com.atproto.repo.create_record(
-            repo=client.me.did,                # 投稿先ユーザー DID
-            collection="app.bsky.feed.post",   # 投稿先コレクション
-            record=post_data                   # record に修正
+            repo=client.me.did,
+            collection="app.bsky.feed.post",
+            record=post_data
         )
         logging.info("投稿成功")
     except Exception as e:
         logging.error(f"Bluesky 投稿失敗: {e}")
         raise
-    
+
 # =========================================================
 # main
 # =========================================================
@@ -283,7 +275,6 @@ def main():
             since = parse_iso(last_checked)
         until = now
 
-        # データ取得
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -293,11 +284,9 @@ def main():
         else:
             continue
 
-        # 初回スキップ
         if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ")
             for item in items:
-                # 初回は retry 対象外
                 site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})[item["id"]] = {
                     "status": "skipped",
                     "last_attempt_at": isoformat(now),
@@ -309,18 +298,13 @@ def main():
                 entry_dict = site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})
                 retry_entry = entry_dict.get(cid, {})
 
-                # CVE 系のみ既投稿チェック
                 if site["type"] in ("nvd_api", "jvn") and retry_entry.get("status") == "success":
                     logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
-                # 修正: force_test=True の場合は要約を OFF にして投稿テスト可能
                 summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
 
-                # ===============================
-                # 投稿文生成・要約枠反映
-                # ===============================
                 post_text, cve_line = format_post(site, summary, item)
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
 
@@ -333,7 +317,6 @@ def main():
                     if summary.startswith("要約生成に失敗"):
                         post_status = "fallback"
 
-                # retry_ids / entries に投稿結果を登録
                 retry_count = retry_entry.get("retry_count", 0)
                 entry_dict[cid] = {
                     "status": post_status,
@@ -341,13 +324,11 @@ def main():
                     "retry_count": retry_count + 1
                 }
 
-                # 投稿間隔ランダム待機（30〜90秒）
                 if idx < len(items) - 1:
                     wait_time = random.randint(30, 90)
                     logging.info(f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒")
                     time.sleep(wait_time)
 
-        # 最終更新
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
