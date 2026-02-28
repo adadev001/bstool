@@ -210,7 +210,7 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿（最新 SDK 対応）
+# Bluesky 投稿（最新 SDK 対応）修正版
 # =========================================================
 def post_bluesky(client, text, url, test_mode=False):
     """
@@ -233,11 +233,11 @@ def post_bluesky(client, text, url, test_mode=False):
     }
 
     try:
-        # Bluesky 投稿処理
+        # 修正: 最新 SDK では record=post_data が必須
         client.com.atproto.repo.create_record(
-            repo=client.me.did,           # 投稿先ユーザー DID
-            collection="app.bsky.feed.post",  # 投稿先コレクション
-            data=post_data                # ここを record -> data に変更
+            repo=client.me.did,                # 投稿先ユーザー DID
+            collection="app.bsky.feed.post",   # 投稿先コレクション
+            record=post_data                   # ここを data -> record に戻す
         )
         logging.info("投稿成功")
     except Exception as e:
@@ -314,6 +314,7 @@ def main():
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
+                # 修正: force_test=True の場合は要約を OFF にして投稿テスト可能
                 summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
                 post_text, cve_line = format_post(site, summary, item)
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
