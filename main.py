@@ -319,7 +319,7 @@ def main():
                 retry_entry = entry_dict.get(cid, {})
 
                 # CVE 系のみ既投稿チェック
-                if site["type"] in ("nvd_api", "jvn") and retry_entry.get("status") == "success":
+                if site["type"] in ("nvd_api", "jvn_rss") and retry_entry.get("status") == "success":
                     logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
                     continue
 
