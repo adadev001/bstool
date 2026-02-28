@@ -219,12 +219,23 @@ def post_bluesky(client, text, item, mode):
     - External embed は title / description / uri を必須指定
     """
 
-    embed = models.AppBskyEmbedExternal(
+    embed = models.AppBskyEmbedExternal.Main(   # ★ここが重要
         external=models.AppBskyEmbedExternal.External(
             uri=item["url"],
             title=item.get("title") or item["id"],
             description=safe_truncate(item.get("text", ""), 200),
         )
+    )
+
+    if mode == "test":
+        logging.info("[TEST] 投稿スキップ")
+        logging.info(text)
+        logging.info(item["url"])
+        return
+
+    client.send_post(
+        text=text,
+        embed=embed,
     )
 
     if mode == "test":
