@@ -233,11 +233,11 @@ def post_bluesky(client, text, url, test_mode=False):
     }
 
     try:
-        # create_record で投稿
+        # Bluesky 投稿処理
         client.com.atproto.repo.create_record(
-            repo=client.me.did,
-            collection="app.bsky.feed.post",
-            record=post_data
+            repo=client.me.did,           # 投稿先ユーザー DID
+            collection="app.bsky.feed.post",  # 投稿先コレクション
+            data=post_data                # ここを record -> data に変更
         )
         logging.info("投稿成功")
     except Exception as e:
