@@ -215,13 +215,17 @@ def fetch_jvn(site, since, until):
 # Bluesky 投稿
 # =========================================================
 def post_bluesky(client, text, url):
-    embed = models.AppBskyFeedPost(
+    post = models.AppBskyFeedPost(
         text=text,
-        embed=models.AppBskyFeedPostEmbedExternal(
-            external=models.AppBskyFeedDefsExternal(uri=url)
+        embed=models.AppBskyEmbedExternal(
+            external=models.AppBskyEmbedExternal.External(
+                uri=url,
+                title=url,
+                description=""
+            )
         )
     )
-    client.send_post(embed)
+    client.send_post(post)
 
 # =========================================================
 # main
