@@ -57,19 +57,17 @@ def normalize_site_state(site_key, raw_state, now, mode, site_type):
     migrated = False
     if raw_state is None:
         state_base = {"last_checked_at": None}
-        if site_type in ("rss",):
+        if site_type == "rss":
             state_base["entries"] = {}
         else:
             state_base["retry_ids"] = {}
         return state_base, False
 
-    if site_type == "rss":
-        raw_state.setdefault("last_checked_at", None)
-        raw_state.setdefault("entries", {})
-        return raw_state, migrated
-
     raw_state.setdefault("last_checked_at", None)
-    raw_state.setdefault("retry_ids", {})
+    if site_type == "rss":
+        raw_state.setdefault("entries", {})
+    else:
+        raw_state.setdefault("retry_ids", {})
     return raw_state, migrated
 
 # =========================================================
@@ -147,14 +145,12 @@ def summarize(text, api_key, site_type=None):
             )
             return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
         except Exception as e:
-            msg = str(e)
-            if attempt < 3 and ("429" in msg or "503" in msg):
-                logging.warning("Gemini summarize retry due to 429/503")
+            if attempt < 3 and any(x in str(e) for x in ("429", "503")):
                 time.sleep(5 * attempt)
                 continue
-            logging.error(f"Gemini summarize failed: {e}")
             break
-    return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
+
+    return "要約生成に失敗したため、概要のみ通知します。"
 
 # =========================================================
 # データ取得
@@ -165,7 +161,8 @@ def fetch_rss(site, since=None, until=None):
     for entry in feed.entries[: site.get("max_items", 1)]:
         items.append({
             "id": entry.get("link"),
-            "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
+            "title": entry.get("title", ""),
+            "text": entry.get("summary", ""),
             "url": entry.get("link"),
         })
     return items
@@ -175,11 +172,12 @@ def fetch_nvd(site, start, end):
     params = {
         "resultsPerPage": site.get("max_items", 50),
         "pubStartDate": isoformat(start),
-        "pubEndDate": isoformat(end)
+        "pubEndDate": isoformat(end),
     }
     resp = requests.get(url, params=params, timeout=30)
     resp.raise_for_status()
     data = resp.json()
+
     items = []
     for v in data.get("vulnerabilities", []):
         cve = v.get("cve", {})
@@ -187,9 +185,10 @@ def fetch_nvd(site, start, end):
         desc = cve.get("descriptions", [{}])[0].get("value", "")
         items.append({
             "id": cid,
-            "score": 0,
+            "title": cid,
             "text": desc,
-            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}",
+            "score": 0,
         })
     return items
 
@@ -197,45 +196,46 @@ def fetch_jvn(site, since, until):
     feed = feedparser.parse(site["url"])
     items = []
     for entry in feed.entries:
-        cve_ids = [
-            t for t in entry.get("tags", [])
-            if t.get("term", "").startswith("CVE-")
-        ]
+        cve_ids = [t for t in entry.get("tags", []) if t.get("term", "").startswith("CVE-")]
         if not cve_ids:
             continue
         items.append({
             "id": cve_ids[0]["term"],
-            "score": site.get("default_cvss", 0),
+            "title": entry.get("title", ""),
             "text": entry.get("summary", ""),
-            "url": entry.get("link")
+            "url": entry.get("link"),
+            "score": site.get("default_cvss", 0),
         })
     return items[: site.get("max_items", 1)]
 
 # =========================================================
 # Bluesky 投稿
 # =========================================================
-def post_bluesky(client, text, url):
+def post_bluesky(client, text, item, mode):
     """
-    Bluesky 投稿処理
+    ★設計固定
+    - test : 投稿しない（ログのみ）
+    - prod : client.send_post()
+    - External embed は title / description / uri を必須指定
+    """
 
-    ・atproto SDK の AppBskyEmbedExternal は module 構造であり
-      callable なクラスではない
-    ・そのため SDK クラスを直接 new せず
-      AT Protocol Record を dict で明示的に渡す
-    ・この形式は SDK バージョン差分の影響を受けにくい
-    """
+    embed = models.AppBskyEmbedExternal(
+        external=models.AppBskyEmbedExternal.External(
+            uri=item["url"],
+            title=item.get("title") or item["id"],
+            description=safe_truncate(item.get("text", ""), 200),
+        )
+    )
+
+    if mode == "test":
+        logging.info("[TEST] 投稿スキップ")
+        logging.info(text)
+        logging.info(item["url"])
+        return
+
     client.send_post(
         text=text,
-        embed={
-            "$type": "app.bsky.embed.external",
-            "external": {
-                "uri": url,
-                # title / description は必須ではないが
-                # 将来の拡張を考え、構造が分かるように明示
-                "title": "",
-                "description": ""
-            }
-        }
+        embed=embed,
     )
 
 # =========================================================
@@ -247,19 +247,18 @@ def main():
     settings = config.get("settings", {})
     sites = config.get("sites", {})
     MODE = settings.get("mode", "test").lower()
-    force_test = settings.get("force_test_mode", False)
     skip_first = settings.get("skip_existing_on_first_run", True)
+
     state = load_state()
-    state_dirty = False
     now = utc_now()
     gemini_key = os.environ.get("GEMINI_API_KEY")
 
-    # prod のときのみ Bluesky にログイン
+    client = None
     if MODE == "prod":
         client = Client()
         client.login(
             os.environ["BLUESKY_IDENTIFIER"],
-            os.environ["BLUESKY_PASSWORD"]
+            os.environ["BLUESKY_PASSWORD"],
         )
 
     for site_key, site in sites.items():
@@ -267,24 +266,13 @@ def main():
             continue
 
         logging.info(f"[{site_key}] ---")
-        site_state, migrated = normalize_site_state(
-            site_key,
-            state.get(site_key),
-            now,
-            MODE,
-            site["type"]
+        site_state, _ = normalize_site_state(
+            site_key, state.get(site_key), now, MODE, site["type"]
         )
         state[site_key] = site_state
-        if migrated:
-            state_dirty = True
 
         last_checked = site_state.get("last_checked_at")
-        first_skip = False
-        if last_checked is None:
-            since = now - timedelta(days=1)
-            first_skip = skip_first and MODE == "prod"
-        else:
-            since = parse_iso(last_checked)
+        since = now - timedelta(days=1) if last_checked is None else parse_iso(last_checked)
         until = now
 
         if site["type"] == "rss":
@@ -296,90 +284,18 @@ def main():
         else:
             continue
 
-        if first_skip:
-            logging.info(
-                f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ"
-            )
-            for item in items:
-                site_state.setdefault(
-                    "entries" if site["type"] == "rss" else "retry_ids",
-                    {}
-                )[item["id"]] = {
-                    "status": "skipped",
-                    "last_attempt_at": isoformat(now),
-                    "retry_count": 0
-                }
-        else:
-            for idx, item in enumerate(items):
-                cid = item.get("id")
-                entry_dict = site_state.setdefault(
-                    "entries" if site["type"] == "rss" else "retry_ids",
-                    {}
-                )
-                retry_entry = entry_dict.get(cid, {})
+        for item in items:
+            trimmed = body_trim(item["text"], site_type=site["type"])
+            summary = summarize(trimmed, gemini_key, site["type"])
 
-                if (
-                    site["type"] in ("nvd_api", "jvn")
-                    and retry_entry.get("status") == "success"
-                ):
-                    logging.info(
-                        f"[{site_key}] 既投稿 CVE スキップ: {cid}"
-                    )
-                    continue
+            post_text, cve_line = format_post(site, summary, item)
+            full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
 
-                trimmed = body_trim(
-                    item["text"],
-                    site_type=site["type"]
-                )
-                summary = (
-                    trimmed[:SUMMARY_HARD_LIMIT]
-                    if force_test
-                    else summarize(trimmed, gemini_key, site["type"])
-                )
-
-                post_text, cve_line = format_post(site, summary, item)
-                full_text = (
-                    f"{post_text}\n{cve_line}"
-                    if cve_line
-                    else post_text
-                )
-
-                try:
-                    if MODE == "test":
-                        # test モードでは投稿しない
-                        # 設計どおり「生成結果の確認」のみ行う
-                        logging.info("[TEST] 投稿本文:")
-                        logging.info(full_text)
-                        logging.info(f"[TEST] URL: {item['url']}")
-                        post_status = "success"
-                    else:
-                        # prod のみ実投稿
-                        post_bluesky(client, full_text, item["url"])
-                        post_status = "success"
-                except Exception as e:
-                    logging.error(f"[{site_key}] 投稿失敗: {e}")
-                    post_status = "failed"
-                    if summary.startswith("要約生成に失敗"):
-                        post_status = "fallback"
-
-                retry_count = retry_entry.get("retry_count", 0)
-                entry_dict[cid] = {
-                    "status": post_status,
-                    "last_attempt_at": isoformat(now),
-                    "retry_count": retry_count + 1
-                }
-
-                if idx < len(items) - 1:
-                    wait_time = random.randint(30, 90)
-                    logging.info(
-                        f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒"
-                    )
-                    time.sleep(wait_time)
+            post_bluesky(client, full_text, item, MODE)
 
         site_state["last_checked_at"] = isoformat(now)
-        state_dirty = True
 
-    if MODE == "prod" and state_dirty:
+    if MODE == "prod":
         save_state(state)
 
 if __name__ == "__main__":
