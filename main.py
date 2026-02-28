@@ -210,35 +210,46 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿（最新 SDK 対応）修正版
+# Bluesky 投稿（正常投稿ロジック反映版）
 # =========================================================
 def post_bluesky(client, text, url, test_mode=False):
     """
-    - test_mode=True: 投稿せずログ出力のみ
-    - test_mode=False: 実際に投稿
-    - 外部リンク embed 対応（最新 SDK）
+    ★ 昨日正常投稿できていたロジックを反映
+    - test_mode=True: 投稿せずログ出力
+    - test_mode=False: 最新 SDK でも send_post(text, embed) 形式で安全投稿
     """
     if test_mode:
         logging.info("[TEST] 投稿内容:\n" + text + (f"\nURL: {url}" if url else ""))
         return
 
-    post_data = {
-        "text": text,
-        "embed": {
-            "$type": "app.bsky.embed.external",
-            "external": {
-                "uri": url
-            }
-        }
-    }
+    # 外部リンク embed を作成
+    embed = None
+    if url:
+        try:
+            resp = requests.get("https://cardyb.bsky.app/v1/extract", params={"url": url}, timeout=10)
+            card = resp.json()
+            image_blob = None
+            image_url = card.get("image")
+            if image_url:
+                img = requests.get(image_url, timeout=10)
+                if img.status_code == 200 and len(img.content) < 1_000_000:
+                    upload = client.upload_blob(img.content)
+                    image_blob = upload.blob
+            embed = models.AppBskyEmbedExternal.Main(
+                external=models.AppBskyEmbedExternal.External(
+                    uri=url,
+                    title=card.get("title", ""),
+                    description=card.get("description", ""),
+                    thumb=image_blob
+                )
+            )
+        except Exception as e:
+            logging.warning(f"Embed作成失敗: {e}")
+            embed = None
 
+    # ★ 安全な投稿: send_post を利用して旧ロジックを保持
     try:
-        # 修正: 最新 SDK では record=post_data が必須
-        client.com.atproto.repo.create_record(
-            repo=client.me.did,                # 投稿先ユーザー DID
-            collection="app.bsky.feed.post",   # 投稿先コレクション
-            record=post_data                   # ここを data -> record に戻す
-        )
+        client.send_post(text=text, embed=embed)
         logging.info("投稿成功")
     except Exception as e:
         logging.error(f"Bluesky 投稿失敗: {e}")
@@ -296,7 +307,6 @@ def main():
         if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ")
             for item in items:
-                # 初回は retry 対象外
                 site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})[item["id"]] = {
                     "status": "skipped",
                     "last_attempt_at": isoformat(now),
@@ -314,7 +324,6 @@ def main():
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
-                # 修正: force_test=True の場合は要約を OFF にして投稿テスト可能
                 summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
                 post_text, cve_line = format_post(site, summary, item)
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
@@ -328,7 +337,6 @@ def main():
                     if summary.startswith("要約生成に失敗"):
                         post_status = "fallback"
 
-                # retry_ids / entries に投稿結果を登録
                 retry_count = retry_entry.get("retry_count", 0)
                 entry_dict[cid] = {
                     "status": post_status,
