@@ -244,7 +244,7 @@ def post_bluesky(client, text, url, test_mode=False):
     except Exception as e:
         logging.error(f"Bluesky 投稿失敗: {e}")
         raise
-
+    
 # =========================================================
 # main
 # =========================================================
