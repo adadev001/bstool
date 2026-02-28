@@ -145,16 +145,17 @@ def summarize(text, api_key, site_type=None):
         else "以下を日本語で簡潔に要約してください。80文字以内。"
     ) + f"\n{text}"
 
-    for attempt in (1, 2):
+    # --- FIX / NEW ---: 429/503 retry
+    for attempt in range(1, 4):
         try:
             time.sleep(random.uniform(0.5, 1.5))
             resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
             return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
         except Exception as e:
             msg = str(e)
-            if attempt == 1 and ("429" in msg or "503" in msg):
+            if attempt < 3 and ("429" in msg or "503" in msg):
                 logging.warning("Gemini summarize retry due to 429/503")
-                time.sleep(2)
+                time.sleep(5 * attempt)  # wait longer on repeated failure
                 continue
             logging.error(f"Gemini summarize failed: {e}")
             break
@@ -233,11 +234,11 @@ def post_bluesky(client, text, url, test_mode=False):
     }
 
     try:
-        # 修正: 最新 SDK では record=post_data が必須
+        # --- FIX / NEW ---: 最新 SDK に合わせ record=post_data
         client.com.atproto.repo.create_record(
             repo=client.me.did,                # 投稿先ユーザー DID
             collection="app.bsky.feed.post",   # 投稿先コレクション
-            record=post_data                   # ここを data -> record に戻す
+            record=post_data                   # record に修正
         )
         logging.info("投稿成功")
     except Exception as e:
@@ -318,7 +319,7 @@ def main():
                 summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
 
                 # ===============================
-                # 追加: 投稿文生成・要約枠反映
+                # 投稿文生成・要約枠反映
                 # ===============================
                 post_text, cve_line = format_post(site, summary, item)
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
@@ -340,10 +341,8 @@ def main():
                     "retry_count": retry_count + 1
                 }
 
-                # ===============================
-                # 追加: 投稿間隔ランダム待機（30〜90秒）
-                # ===============================
-                if idx < len(items) - 1:  # 最後の投稿のあとには待たない
+                # 投稿間隔ランダム待機（30〜90秒）
+                if idx < len(items) - 1:
                     wait_time = random.randint(30, 90)
                     logging.info(f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒")
                     time.sleep(wait_time)
