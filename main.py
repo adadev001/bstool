@@ -13,10 +13,10 @@ from datetime import datetime, timedelta, timezone
 # =========================================================
 # 定数定義
 # =========================================================
-SITES_FILE = "sites.yaml"
-STATE_FILE = "processed_urls.json"
-MAX_POST_LENGTH = 140
-SUMMARY_HARD_LIMIT = 80
+SITES_FILE = "sites.yaml"             # サイト設定ファイル
+STATE_FILE = "processed_urls.json"    # 投稿済み管理ファイル
+MAX_POST_LENGTH = 140                 # 投稿本文の最大文字数（X移植前提）
+SUMMARY_HARD_LIMIT = 80               # 要約文字数の安全上限
 
 # =========================================================
 # 時刻ユーティリティ
@@ -54,6 +54,11 @@ def save_state(state):
 # state 正規化
 # =========================================================
 def normalize_site_state(site_key, raw_state, now, mode, site_type):
+    """
+    - RSS は entries で投稿結果を管理
+    - CVE 系は retry_ids で投稿結果管理
+    - last_checked_at は常に進める
+    """
     migrated = False
     if raw_state is None:
         state_base = {"last_checked_at": None}
@@ -68,6 +73,7 @@ def normalize_site_state(site_key, raw_state, now, mode, site_type):
         raw_state.setdefault("entries", {})
         return raw_state, migrated
 
+    # CVE 系
     raw_state.setdefault("last_checked_at", None)
     raw_state.setdefault("retry_ids", {})
     return raw_state, migrated
@@ -106,6 +112,7 @@ def body_trim(text, max_len=2500, site_type=None):
         ]
         return " ".join(lines)[:max_len]
 
+    # RSS は最初の数行を抽出
     lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
     return "\n".join(lines[:6])[:max_len]
 
@@ -138,19 +145,20 @@ def summarize(text, api_key, site_type=None):
         else "以下を日本語で簡潔に要約してください。80文字以内。"
     ) + f"\n{text}"
 
-    for attempt in range(1, 4):
+    for attempt in (1, 2):
         try:
             time.sleep(random.uniform(0.5, 1.5))
             resp = client.models.generate_content(model="gemini-2.5-flash-lite", contents=prompt)
             return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
         except Exception as e:
             msg = str(e)
-            if attempt < 3 and ("429" in msg or "503" in msg):
+            if attempt == 1 and ("429" in msg or "503" in msg):
                 logging.warning("Gemini summarize retry due to 429/503")
-                time.sleep(5 * attempt)
+                time.sleep(2)
                 continue
             logging.error(f"Gemini summarize failed: {e}")
             break
+    # フォールバック文言
     return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
 
 # =========================================================
@@ -202,40 +210,16 @@ def fetch_jvn(site, since, until):
     return items[: site.get("max_items", 1)]
 
 # =========================================================
-# Bluesky 投稿（修正済み） --- 修正箇所コメント付き
+# Bluesky 投稿
 # =========================================================
-def post_bluesky(client, text, url, test_mode=False):
-    """
-    - test_mode=True: 投稿せずログ出力のみ
-    - test_mode=False: 実際に投稿
-    - 外部リンク embed 対応
-    - 【修正コメント】最新 SDK 対応で record=post_data に統一
-    """
-    if test_mode:
-        logging.info("[TEST] 投稿内容:\n" + text + (f"\nURL: {url}" if url else ""))
-        return
-
-    post_data = {
-        "text": text,
-        "embed": {
-            "$type": "app.bsky.embed.external",
-            "external": {
-                "uri": url
-            }
-        }
-    }
-
-    try:
-        # 修正済み: record に統一
-        client.com.atproto.repo.create_record(
-            repo=client.me.did,
-            collection="app.bsky.feed.post",
-            record=post_data
+def post_bluesky(client, text, url):
+    embed = models.AppBskyFeedPost(
+        text=text,
+        embed=models.AppBskyFeedPostEmbedExternal(
+            external=models.AppBskyFeedDefsExternal(uri=url)
         )
-        logging.info("投稿成功")
-    except Exception as e:
-        logging.error(f"Bluesky 投稿失敗: {e}")
-        raise
+    )
+    client.send_post(embed)
 
 # =========================================================
 # main
@@ -275,6 +259,7 @@ def main():
             since = parse_iso(last_checked)
         until = now
 
+        # データ取得
         if site["type"] == "rss":
             items = fetch_rss(site, since, until)
         elif site["type"] == "nvd_api":
@@ -284,39 +269,47 @@ def main():
         else:
             continue
 
+        # 初回スキップ
         if first_skip:
             logging.info(f"[{site_key}] 初回実行のため既存記事 {len(items)} 件をスキップ")
             for item in items:
+                # 初回は retry 対象外
                 site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})[item["id"]] = {
                     "status": "skipped",
                     "last_attempt_at": isoformat(now),
                     "retry_count": 0
                 }
         else:
-            for idx, item in enumerate(items):
+            for item in items:
                 cid = item.get("id")
                 entry_dict = site_state.setdefault("entries" if site["type"]=="rss" else "retry_ids", {})
                 retry_entry = entry_dict.get(cid, {})
 
+                # CVE 系のみ既投稿チェック
                 if site["type"] in ("nvd_api", "jvn") and retry_entry.get("status") == "success":
                     logging.info(f"[{site_key}] 既投稿 CVE スキップ: {cid}")
                     continue
 
                 trimmed = body_trim(item["text"], site_type=site["type"])
                 summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
-
                 post_text, cve_line = format_post(site, summary, item)
                 full_text = f"{post_text}\n{cve_line}" if cve_line else post_text
 
                 try:
-                    post_bluesky(client, full_text, item["url"], test_mode=(MODE=="test"))
-                    post_status = "success"
+                    if MODE == "test":
+                        logging.info("[TEST]\n" + full_text)
+                        post_status = "success"
+                    else:
+                        post_bluesky(client, post_text, item["url"])
+                        post_status = "success"
                 except Exception as e:
                     logging.error(f"[{site_key}] 投稿失敗: {e}")
                     post_status = "failed"
+                    # フォールバック文言の場合は retry に fallback として残す
                     if summary.startswith("要約生成に失敗"):
                         post_status = "fallback"
 
+                # retry_ids / entries に投稿結果を登録
                 retry_count = retry_entry.get("retry_count", 0)
                 entry_dict[cid] = {
                     "status": post_status,
@@ -324,11 +317,7 @@ def main():
                     "retry_count": retry_count + 1
                 }
 
-                if idx < len(items) - 1:
-                    wait_time = random.randint(30, 90)
-                    logging.info(f"[{site_key}] 投稿間隔ランダム待機: {wait_time}秒")
-                    time.sleep(wait_time)
-
+        # 最終更新
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
