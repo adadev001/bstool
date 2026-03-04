@@ -1,296 +1,502 @@
 import os
 import json
-import yaml
 import requests
+import yaml
 import feedparser
 import logging
 import time
 import random
-
 from google import genai
 from atproto import Client, models
 from datetime import datetime, timedelta, timezone
 
 # =========================================================
-# ■ 設計固定値
+# 定数定義
 # =========================================================
-SITES_FILE = "sites.yaml"
-STATE_FILE = "processed_urls.json"
-
-MAX_POST_LENGTH = 140        # 本文最大140文字
-SUMMARY_LIMIT = 80           # 要約最大80文字
-POSTED_ID_RETENTION_DAYS = 30
-POSTED_ID_MAX = 1000
-RETRY_LIMIT = 3
+SITES_FILE = "sites.yaml"             # サイト設定ファイル
+STATE_FILE = "processed_urls.json"    # 投稿済み管理ファイル
+MAX_POST_LENGTH = 140                 # 投稿本文の最大文字数（X移植前提）
+SUMMARY_HARD_LIMIT = 80               # 要約文字数の安全上限
+POSTED_ID_RETENTION_DAYS = 30         # posted_id の保持日数
+POSTED_ID_MAX = 1000                  # posted_id の最大件数
+RETRY_LIMIT = 3                        # retry_ids 処理上限（例：3件）
 
 # =========================================================
-# ■ 時刻ユーティリティ
+# 時刻ユーティリティ
 # =========================================================
 def utc_now():
+    """UTC現在時刻を返す"""
     return datetime.now(timezone.utc)
 
-def iso(dt):
+def isoformat(dt: datetime) -> str:
+    """datetime → ISO8601 文字列"""
     return dt.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
-def parse_iso(ts):
+def parse_iso(ts: str) -> datetime:
+    """ISO8601文字列 → datetime"""
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 # =========================================================
-# ■ state構造（設計書100％一致）
+# 設定 / state 読み込み
 # =========================================================
-def empty_site_state():
-    return {
-        "last_checked_at": None,
-        "posted_ids": {},
-        "retry_ids": [],
-        "known_cves": [],
-        "entries": {}
-    }
+def load_config():
+    with open(SITES_FILE, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 def load_state():
     if not os.path.exists(STATE_FILE):
         return {}
     with open(STATE_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+        try:
+            return json.load(f)
+        except Exception:
+            return {}
 
 def save_state(state):
+    """state を JSON ファイルに保存"""
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 # =========================================================
-# ■ posted_ids prune
+# state 正規化（後方互換対応）
 # =========================================================
-def prune_posted_ids(posted_ids, now):
+def normalize_site_state(site_key, raw_state, now, mode):
+    """
+    - list形式だった posted_ids を dict に変換
+    - last_checked_at が未設定の場合は初期値 None
+    - retry_ids と entries を初期化
+    """
+    migrated = False
+    if raw_state is None:
+        return {
+            "last_checked_at": None,
+            "posted_ids": {},
+            "retry_ids": [],
+            "entries": {},
+            "known_cves": []
+        }, False
+
+    # posted_ids list → dict 変換
+    if isinstance(raw_state, list):
+        return {
+            "last_checked_at": None,
+            "posted_ids": {cid: isoformat(now) for cid in raw_state},
+            "retry_ids": [],
+            "entries": {},
+            "known_cves": []
+        }, True
+
+    posted = raw_state.get("posted_ids")
+    if isinstance(posted, list):
+        raw_state["posted_ids"] = {cid: isoformat(now) for cid in posted}
+        migrated = True
+
+    raw_state.setdefault("posted_ids", {})
+    raw_state.setdefault("retry_ids", [])
+    raw_state.setdefault("entries", {})
+    raw_state.setdefault("known_cves", [])
+    return raw_state, migrated
+
+def prune_posted_ids(posted_ids: dict, now: datetime):
+    """
+    - 保持期間超過の posted_id を削除
+    - 件数上限を超えた場合、古い順に削除
+    """
+    before = len(posted_ids)
     cutoff = now - timedelta(days=POSTED_ID_RETENTION_DAYS)
-    for key in list(posted_ids.keys()):
-        if parse_iso(posted_ids[key]) < cutoff:
-            del posted_ids[key]
+
+    expired = [cid for cid, ts in posted_ids.items() if parse_iso(ts) < cutoff]
+    for cid in expired:
+        del posted_ids[cid]
+
     if len(posted_ids) > POSTED_ID_MAX:
         sorted_items = sorted(posted_ids.items(), key=lambda x: parse_iso(x[1]))
-        for key, _ in sorted_items[:-POSTED_ID_MAX]:
-            del posted_ids[key]
+        for cid, _ in sorted_items[:-POSTED_ID_MAX]:
+            del posted_ids[cid]
+
+    return before - len(posted_ids)
 
 # =========================================================
-# ■ 共通
+# 共通ユーティリティ
 # =========================================================
-def safe_truncate(text, limit):
-    return text if len(text) <= limit else text[:limit-1] + "…"
+def cvss_to_severity(score: float) -> str:
+    if score >= 9.0:
+        return "CRITICAL"
+    elif score >= 7.0:
+        return "HIGH"
+    elif score >= 4.0:
+        return "MEDIUM"
+    else:
+        return "LOW"
+
+def safe_truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
 
 # =========================================================
-# ■ Gemini要約（フォールバック区別あり）
+# 本文前処理
 # =========================================================
-def summarize(text, api_key):
+def body_trim(text, max_len=2500, site_type=None):
+    if site_type in ("nvd_api", "jvn"):
+        lines = [
+            l.strip()
+            for l in text.splitlines()
+            if any(k in l.lower() for k in [
+                "allow", "allows", "could", "can",
+                "vulnerability", "attack", "execute",
+                "disclosure", "denial"
+            ])
+        ]
+        return " ".join(lines)[:max_len]
+
+    lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 10]
+    return "\n".join(lines[:6])[:max_len]
+
+# =========================================================
+# CVE 既投稿チェック（CVE横断重複対応）
+# =========================================================
+def is_cve_already_posted(cid, site_type, state):
+    if not cid or site_type == "rss":
+        return False
+    known_cves = state.get("nvd", {}).get("known_cves", [])
+    return cid in known_cves
+
+# =========================================================
+# 投稿文生成
+# =========================================================
+def format_post(site, summary, item):
+    summary_text = safe_truncate(summary.replace("\n", " "), MAX_POST_LENGTH)
+
+    if site["type"] in ("nvd_api", "jvn"):
+        score = item.get("score", 0)
+        severity = cvss_to_severity(score)
+        cve_line = f"{item['id']} CVSS {score} | {severity}"
+        return f"{summary_text}\n{cve_line}"
+
+    return summary_text
+
+# =========================================================
+# Gemini 要約（retry_ids対応・フォールバック反映済）
+# =========================================================
+def summarize(text, api_key, site_type=None):
     client = genai.Client(api_key=api_key)
-    prompt = f"""
-日本語80文字以内で事実のみ要約。
-CVE番号は含めない。
-{text}
+
+    prompt = (
+        """
+以下の観点を必ず含め、日本語80文字以内で要約してください。
+
+- 脆弱性の内容
+- 影響を受ける対象
+- 攻撃者が可能になる行為
+
+注意:
+- CVE番号は含めない
+- 不明点は「可能性がある」と表現
+- 事実のみ
 """
+        if site_type in ("nvd_api", "jvn")
+        else """
+以下を日本語で簡潔に要約してください。
+事実のみ。誇張なし。
+80文字以内。
+"""
+    ) + f"\n{text}"
+
     for attempt in (1, 2):
         try:
+            # === 429対応 追加：事前ジッター ===
             time.sleep(random.uniform(0.5, 1.5))
+
             resp = client.models.generate_content(
                 model="gemini-2.5-flash-lite",
                 contents=prompt
             )
-            return safe_truncate(resp.text.strip(), SUMMARY_LIMIT), False
+            return safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
+
         except Exception as e:
             msg = str(e)
+
+            # === 429 / 503 のみ 1回だけリトライ ===
             if attempt == 1 and ("429" in msg or "503" in msg):
-                # パターンA: API制限はリトライ
+                logging.warning("Gemini summarize retry due to 429/503")
                 time.sleep(2)
                 continue
+
+            logging.error(f"Gemini summarize failed: {e}")
             break
-    # フォールバック文
-    return "要約生成に失敗したため、脆弱性の存在のみ通知します。", True
+
+    # === フォールバック（必ず文字列を返す） ===
+    return "要約生成に失敗したため、脆弱性の存在のみ通知します。"
 
 # =========================================================
-# ■ RSS取得
+# データ取得（RSS / NVD / JVN）
 # =========================================================
-def fetch_rss(site):
+def fetch_rss(site, since=None, until=None):
     feed = feedparser.parse(site["url"])
     items = []
-    for e in feed.entries[: site.get("max_items", 1)]:
+
+    for entry in feed.entries[: site.get("max_items", 1)]:
+        published = entry.get("published_parsed")
+        if published and since and until:
+            entry_time = datetime.fromtimestamp(time.mktime(published), tz=timezone.utc)
+            if not (since < entry_time <= until):
+                continue
+
         items.append({
-            "id": e.get("link"),
-            "text": f"{e.get('title','')}\n{e.get('summary','')}",
-            "url": e.get("link")
+            "id": entry.get("link"),
+            "text": f"{entry.get('title','')}\n{entry.get('summary','')}",
+            "url": entry.get("link"),
         })
+
     return items
 
+def fetch_nvd(site, start, end):
+    url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+    params = {
+        "resultsPerPage": site.get("max_items", 50),
+        "pubStartDate": isoformat(start),
+        "pubEndDate": isoformat(end),
+    }
+
+    resp = requests.get(url, params=params, timeout=30)
+
+    if resp.status_code == 429:
+        logging.warning("NVD API rate limited (429), skipping this cycle")
+        return []
+
+    resp.raise_for_status()
+    data = resp.json()
+
+    threshold = float(site.get("cvss_threshold", 0))
+    items = []
+
+    for v in data.get("vulnerabilities", []):
+        cve = v.get("cve", {})
+        cid = cve.get("id")
+        metrics = cve.get("metrics", {})
+        score = 0
+
+        for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+            if key in metrics:
+                score = float(metrics[key][0]["cvssData"]["baseScore"])
+                break
+
+        if not cid or score < threshold:
+            continue
+
+        desc = cve.get("descriptions", [{}])[0].get("value", "")
+        items.append({
+            "id": cid,
+            "score": score,
+            "text": desc,
+            "url": f"https://nvd.nist.gov/vuln/detail/{cid}"
+        })
+
+    return items
+
+def fetch_jvn(site, since, until):
+    feed = feedparser.parse(site["url"])
+    items = []
+
+    for entry in feed.entries:
+        if not entry.get("published_parsed"):
+            continue
+
+        entry_time = datetime.fromtimestamp(time.mktime(entry.published_parsed), tz=timezone.utc)
+        if not (since < entry_time <= until):
+            continue
+
+        cve_ids = [t for t in entry.get("tags", []) if t.get("term", "").startswith("CVE-")]
+        if not cve_ids:
+            continue
+
+        items.append({
+            "id": cve_ids[0]["term"],
+            "score": site.get("default_cvss", 0),
+            "text": entry.get("summary", ""),
+            "url": entry.get("link")
+        })
+
+    return items[: site.get("max_items", 1)]
+
 # =========================================================
-# ■ Bluesky投稿（設計準拠 embed専用）
+# Bluesky 投稿
 # =========================================================
 def post_bluesky(client, text, url):
-    # URLは本文に含めず embed として投稿
-    embed = models.AppBskyEmbedExternal.Main(
-        external=models.AppBskyEmbedExternal.External(
-            uri=url,
-            title="",
-            description=""
+    """
+    - Embed 付き投稿
+    - フォールバックあり
+    """
+    try:
+        resp = requests.get("https://cardyb.bsky.app/v1/extract", params={"url": url}, timeout=10)
+        card = resp.json()
+
+        image_blob = None
+        image_url = card.get("image")
+        if image_url:
+            img = requests.get(image_url, timeout=10)
+            if img.status_code == 200 and len(img.content) < 1_000_000:
+                upload = client.upload_blob(img.content)
+                image_blob = upload.blob
+
+        embed = models.AppBskyEmbedExternal.Main(
+            external=models.AppBskyEmbedExternal.External(
+                uri=url,
+                title=card.get("title", ""),
+                description=card.get("description", ""),
+                thumb=image_blob
+            )
         )
-    )
-    client.send_post(
-        text=text,
-        embed=embed
-    )
+        client.send_post(text=text, embed=embed)
+
+    except Exception as e:
+        logging.warning(f"Embed failed: {e}")
+        client.send_post(text=text + f"\n{url}")
 
 # =========================================================
-# ■ CVE系URL生成
-# =========================================================
-def cve_url(source, cve_id):
-    if source.lower() == "nvd":
-        return f"https://nvd.nist.gov/vuln/detail/{cve_id}"
-    elif source.lower() == "jvn":
-        return f"https://jvn.jp/vu?id={cve_id}"
-    elif source.lower() == "jvd":
-        return f"https://jvndb.jvn.jp/contents/{cve_id}.html"
-    else:
-        return None
-
-# =========================================================
-# ■ メイン処理
+# main
 # =========================================================
 def main():
-    logging.basicConfig(level=logging.INFO)
-    config = yaml.safe_load(open(SITES_FILE, encoding="utf-8"))
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
+
+    config = load_config()
     settings = config.get("settings", {})
     sites = config.get("sites", {})
+
     MODE = settings.get("mode", "test").lower()
     force_test = settings.get("force_test_mode", False)
     skip_first = settings.get("skip_existing_on_first_run", True)
 
-    state = load_state()
+    original_state = load_state()
+    state = json.loads(json.dumps(original_state))
+    state_dirty = False
+
     now = utc_now()
     gemini_key = os.environ.get("GEMINI_API_KEY")
 
-    # prodモード時にBlueskyクライアント作成
-    client = None
     if MODE == "prod":
         client = Client(base_url="https://bsky.social")
         client.login(
-            os.environ["BLUESKY_IDENTIFIER"],
-            os.environ["BLUESKY_PASSWORD"]
+            os.environ.get("BLUESKY_IDENTIFIER"),
+            os.environ.get("BLUESKY_PASSWORD")
         )
 
     for site_key, site in sites.items():
-        if not site.get("enabled"):
+        if not site.get("enabled", False):
             continue
 
         logging.info(f"[{site_key}] ---")
-        site_state = state.setdefault(site_key, empty_site_state())
 
-        # 初回スキップ（事故防止）
-        if site_state["last_checked_at"] is None and skip_first and MODE == "prod":
-            items = fetch_rss(site)
-            logging.info(f"初回スキップ {len(items)} 件")
-            site_state["last_checked_at"] = iso(now)
+        fetched_count = 0
+        posted_count = 0
+        cve_skip_count = 0
+        first_skip = False
+
+        # === state 正規化 ===
+        site_state, migrated = normalize_site_state(site_key, state.get(site_key), now, MODE)
+        state[site_key] = site_state
+        if migrated and MODE == "prod":
+            logging.info(f"Migrate state for {site_key} (prod)")
+            state_dirty = True
+
+        # retry_ids 先行処理
+        retry_ids = list(site_state.get("retry_ids", []))
+        if retry_ids:
+            logging.info(f"[{site_key}] retry_ids 処理対象 {len(retry_ids)} 件")
+            # retry 処理は取得記事と統合して下記ループに含める
+
+        last_checked = site_state.get("last_checked_at")
+
+        if last_checked:
+            since = parse_iso(last_checked)
+        else:
+            since = now - timedelta(days=1)
+            first_skip = skip_first and MODE == "prod"
+
+        until = now
+
+        # === 記事取得 ===
+        if site["type"] == "rss":
+            items = fetch_rss(site, since, until)
+        elif site["type"] == "nvd_api":
+            items = fetch_nvd(site, since, until)
+        elif site["type"] in ("jvn", "jvn_rss"):
+            items = fetch_jvn(site, since, until)
+        else:
             continue
 
-        # ==================================================
-        # ① retry_ids 優先処理
-        # ==================================================
-        retry_queue = site_state["retry_ids"][:RETRY_LIMIT]
-        site_state["retry_ids"] = site_state["retry_ids"][RETRY_LIMIT:]
-        processing_items = []
+        fetched_count = len(items)
 
-        for key in retry_queue:
-            entry = site_state["entries"].get(key)
-            if entry:
-                # 元記事を取得して要約生成
-                original_text = entry.get("text", "")
-                if not force_test:
-                    summary, fallback = summarize(original_text, gemini_key)
-                else:
-                    summary = safe_truncate(original_text, SUMMARY_LIMIT)
-                    fallback = False
-                processing_items.append({
-                    "id": key,
-                    "text": original_text,
-                    "url": entry.get("url"),
-                    "summary": summary,
-                    "fallback": fallback
-                })
+        if first_skip:
+            logging.info(f"[{site_key}] 初回実行のため既存記事 {fetched_count} 件をスキップ")
+        else:
+            for item in items:
+                cid = item.get("id")
+                entry_key = cid or item.get("url")
 
-        # ==================================================
-        # ② 通常記事取得
-        # ==================================================
-        new_items = fetch_rss(site)
-        if MODE == "test":
-            new_items = new_items[:1]
-        for item in new_items:
-            # CVE系判定と既知重複チェック
-            cve_id = item.get("cve_id")  # RSS以外の場合は適宜設定
-            if cve_id and cve_id in site_state["known_cves"]:
-                logging.info(f"スキップ済 CVE {cve_id}")
-                continue
-            processing_items.append(item)
+                # 重複確認（CVE横断）
+                if site["type"] in ("nvd_api", "jvn") and is_cve_already_posted(cid, site["type"], state):
+                    cve_skip_count += 1
+                    site_state["entries"].setdefault(entry_key, {}).update({
+                        "status": "skipped",
+                        "first_seen_at": isoformat(now),
+                        "last_tried_at": isoformat(now),
+                        "reason": "known_cve",
+                        "retry_count": 0,
+                        "posted_at": None
+                    })
+                    continue
 
-        # ==================================================
-        # ③ 投稿処理
-        # ==================================================
-        for item in processing_items:
-            entry_key = item["id"]
-            entry = site_state["entries"].setdefault(entry_key, {
-                "status": None,
-                "retry_count": 0,
-                "first_seen_at": iso(now),
-                "last_tried_at": None,
-                "posted_at": None,
-                "reason": "",
-                "text": item.get("text", ""),
-                "url": item.get("url", "")
-            })
-            entry["last_tried_at"] = iso(now)
+                # 本文処理
+                trimmed = body_trim(item["text"], site_type=site["type"])
+                summary = trimmed[:SUMMARY_HARD_LIMIT] if force_test else summarize(trimmed, gemini_key, site["type"])
+                post_text = format_post(site, summary, item)
 
-            # Gemini要約
-            if "summary" in item:
-                summary = item["summary"]
-                fallback = item.get("fallback", False)
-            else:
-                if force_test:
-                    summary = safe_truncate(item["text"], SUMMARY_LIMIT)
-                    fallback = False
-                else:
-                    summary, fallback = summarize(item["text"], gemini_key)
+                # 投稿
+                try:
+                    if MODE == "test":
+                        logging.info("[TEST]\n" + post_text)
+                    else:
+                        post_bluesky(client, post_text, item["url"])
+                        time.sleep(random.randint(30, 90))
 
-            post_text = safe_truncate(summary, MAX_POST_LENGTH)
+                    # 成功
+                    site_state["entries"].setdefault(entry_key, {}).update({
+                        "status": "success",
+                        "first_seen_at": isoformat(now),
+                        "last_tried_at": isoformat(now),
+                        "reason": "",
+                        "retry_count": 0,
+                        "posted_at": isoformat(now)
+                    })
+                    if site["type"] in ("nvd_api", "jvn"):
+                        site_state.setdefault("known_cves", []).append(cid)
+                        site_state["posted_ids"][cid] = isoformat(now)
+                        prune_posted_ids(site_state["posted_ids"], now)
 
-            # CVE末尾付与
-            cve_id = item.get("cve_id")
-            if cve_id:
-                post_text = f"{post_text}\n{cve_id}"
+                    posted_count += 1
 
-            # 投稿実行
-            try:
-                if MODE == "prod":
-                    post_bluesky(client, post_text, item["url"])
-                    time.sleep(random.randint(30, 90))
-                else:
-                    logging.info(f"[TEST] {post_text}")
+                except Exception as e:
+                    # 失敗 → retry_ids 登録
+                    logging.warning(f"[{site_key}] 投稿失敗: {e}")
+                    site_state["entries"].setdefault(entry_key, {}).update({
+                        "status": "failed",
+                        "first_seen_at": isoformat(now),
+                        "last_tried_at": isoformat(now),
+                        "reason": str(e),
+                        "retry_count": site_state["entries"].get(entry_key, {}).get("retry_count", 0) + 1,
+                        "posted_at": None
+                    })
+                    site_state.setdefault("retry_ids", []).append(entry_key)
 
-                entry["status"] = "fallback" if fallback else "success"
-                entry["posted_at"] = iso(now)
-                entry["retry_count"] = 0
+        site_state["last_checked_at"] = isoformat(now)
+        state_dirty = True
 
-                # CVE成功時は known_cves に追加
-                if cve_id and entry["status"] == "success":
-                    if cve_id not in site_state["known_cves"]:
-                        site_state["known_cves"].append(cve_id)
+        # サイト単位サマリログ
+        logging.info(f"[{site_key}] fetched={fetched_count}, posted={posted_count}, skipped={cve_skip_count}, retry={len(site_state.get('retry_ids', []))}")
 
-            except Exception as e:
-                entry["status"] = "failed"
-                entry["retry_count"] += 1
-                entry["reason"] = str(e)
-                if entry["retry_count"] < RETRY_LIMIT:
-                    site_state["retry_ids"].append(entry_key)
-
-        # posted_ids prune
-        prune_posted_ids(site_state["posted_ids"], now)
-        site_state["last_checked_at"] = iso(now)
-
-    # 永続化
-    if MODE == "prod":
+    if MODE == "prod" and state_dirty:
         save_state(state)
 
 if __name__ == "__main__":
