@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 SITES_FILE = "sites.yaml"
 STATE_FILE = "processed_urls.json"
 MAX_POST_LENGTH = 140
-SUMMARY_HARD_LIMIT = 80
+SUMMARY_HARD_LIMIT = 100
 POSTED_ID_RETENTION_DAYS = 30
 POSTED_ID_MAX = 1000
 RETRY_LIMIT = 3
@@ -167,7 +167,7 @@ def summarize(text, api_key, site_type=None):
     client = genai.Client(api_key=api_key)
     prompt = (
         """
-以下の観点を必ず含め、日本語80文字以内で要約してください。
+以下の観点を必ず含め、日本語100文字以内で要約してください。
 
 - 対象の製品（アプリ）名とバージョン
 - 脆弱性の内容
@@ -181,7 +181,7 @@ def summarize(text, api_key, site_type=None):
 """
         if site_type in ("nvd_api", "jvn")
         else """
-以下の観点を必ず含め、日本語80文字以内で要約してください。
+以下の観点を必ず含め、日本語100文字以内で要約してください。
 
 - 対象の製品（アプリ）名とバージョン
 - 脆弱性の内容
