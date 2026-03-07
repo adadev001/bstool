@@ -167,7 +167,8 @@ def summarize(text, api_key, site_type=None):
     client = genai.Client(api_key=api_key)
     prompt = (
         """
-以下の観点を必ず含め、日本語100文字以内で要約してください。
+以下の観点がある場合には必ず含めてください。
+ない場合には記事内容の事実のみを日本語100文字以内で要約してください。
 
 - 対象の製品（アプリ）名とバージョン
 - 脆弱性の内容
