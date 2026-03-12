@@ -6,8 +6,10 @@ import feedparser
 import logging
 import time
 import random
+import httpx
 from google import genai
 from atproto import Client, models
+from atproto_client.exceptions import InvokeTimeoutError
 from datetime import datetime, timedelta, timezone
 
 # =========================================================
@@ -190,11 +192,6 @@ def summarize(text, api_key, site_type=None):
 - 攻撃者が可能になる行為
 - 事実のみ、誇張なし
 """
-# 20260307 NVDの要約条件修正
-# 以下を日本語で簡潔に要約してください。
-# 事実のみ。誇張なし。
-# 80文字以内。
-# """
     ) + f"\n{text}"
 
     for attempt in (1, 2):
@@ -403,9 +400,7 @@ def post_bluesky(client, text, url):
 
     except Exception as embed_err:
         # embed失敗 → テキスト投稿にフォールバック
-        # ★ ここでの例外は飲み込む（embedの失敗はretry不要）
         logging.warning(f"Embed failed, fallback to text post: {embed_err}")
-        # ★ テキスト投稿が失敗した場合は例外を外に伝播させ、retry_ids に登録させる
         client.send_post(text=text + f"\n{url}")
 
 # =========================================================
@@ -428,9 +423,6 @@ def process_item(item, site, site_state, state, now, MODE, force_test, gemini_ke
             "last_tried_at": isoformat(now),
             "reason": "known_cve",
         })
-        # CVE横断重複スキップ：NVD/JVN間の重複判定によるスキップ。
-        # このケースでは retry_ids に登録されていないが、
-        # 万一 retry_ids に残っていた場合は除去して再試行を止める。
         if entry_key in site_state.get("retry_ids", []):
             site_state["retry_ids"].remove(entry_key)
         return "skipped"
@@ -447,8 +439,6 @@ def process_item(item, site, site_state, state, now, MODE, force_test, gemini_ke
         summary = summarize(trimmed, gemini_key, site["type"])
         gemini_failed = (summary is None)
         if gemini_failed:
-            # ★ Gemini失敗（429/503等）→ フォールバック文字列で即投稿
-            #    その後、retry_count < GEMINI_RETRY_MAX なら retry_ids に登録して次回再要約・再投稿
             summary = "要約生成に失敗したため、脆弱性の存在のみ通知します。"
             logging.warning(f"[{site.get('display_name', site['type'])}] Gemini要約失敗、フォールバック投稿: {entry_key}")
 
@@ -465,7 +455,6 @@ def process_item(item, site, site_state, state, now, MODE, force_test, gemini_ke
         current_retry_count = site_state["entries"].get(entry_key, {}).get("retry_count", 0)
 
         if gemini_failed:
-            # フォールバック投稿成功：retry_count < GEMINI_RETRY_MAX なら retry_ids に登録して次回再要約
             new_retry_count = current_retry_count + 1
             final_status = "fallback"
             if new_retry_count <= GEMINI_RETRY_MAX:
@@ -475,15 +464,12 @@ def process_item(item, site, site_state, state, now, MODE, force_test, gemini_ke
             else:
                 logging.info(f"[{site.get('display_name', site['type'])}] retry上限到達、retry_ids登録なし: {entry_key}")
         else:
-            # 通常要約投稿成功（またはretryで要約成功）
             new_retry_count = current_retry_count
             final_status = "success"
-            # retry_ids から除去（要約成功で完了）
             if entry_key in site_state.get("retry_ids", []):
                 site_state["retry_ids"].remove(entry_key)
 
         entry = site_state["entries"].setdefault(entry_key, {})
-        # original_text は保存しない（retry時はソースから再取得する）
         entry.update({
             "status": final_status,
             "first_seen_at": entry.get("first_seen_at", isoformat(now)),
@@ -496,8 +482,6 @@ def process_item(item, site, site_state, state, now, MODE, force_test, gemini_ke
         })
 
         if site["type"] in ("nvd_api", "jvn") and cid and not gemini_failed:
-            # 要約あり投稿成功時のみ known_cves に登録
-            # （fallback投稿では次回再投稿するため、まだ完了扱いにしない）
             if cid not in site_state.get("known_cves", []):
                 site_state.setdefault("known_cves", []).append(cid)
             site_state["posted_ids"][cid] = isoformat(now)
@@ -521,12 +505,10 @@ def process_item(item, site, site_state, state, now, MODE, force_test, gemini_ke
             "reason": str(e),
             "retry_count": retry_count,
             "posted_at": None,
-            # original_text は保存しない（retry時はソースから再取得する）
             "url": post_url,
             "score": item.get("score", 0),
         })
 
-        # retry_ids に追加（重複防止）
         existing_retries = set(site_state.get("retry_ids", []))
         if entry_key not in existing_retries:
             site_state.setdefault("retry_ids", []).append(entry_key)
@@ -554,13 +536,28 @@ def main():
     now = utc_now()
     gemini_key = os.environ.get("GEMINI_API_KEY")
 
+    # =========================================================
+    # Bluesky ログイン（タイムアウト延長 + リトライ付き）
+    # =========================================================
     bsky_client = None
     if MODE == "prod":
         bsky_client = Client(base_url="https://bsky.social")
-        bsky_client.login(
-            os.environ.get("BLUESKY_IDENTIFIER"),
-            os.environ.get("BLUESKY_PASSWORD")
-        )
+        # タイムアウトをデフォルト（約5秒）から30秒に延長
+        bsky_client.request._client = httpx.Client(timeout=30.0)
+
+        for attempt in range(1, 4):
+            try:
+                bsky_client.login(
+                    os.environ.get("BLUESKY_IDENTIFIER"),
+                    os.environ.get("BLUESKY_PASSWORD")
+                )
+                logging.info("Bluesky login successful")
+                break
+            except InvokeTimeoutError:
+                logging.warning(f"Bluesky login timeout (attempt {attempt}/3)")
+                if attempt == 3:
+                    raise
+                time.sleep(5 * attempt)  # 5秒 → 10秒 → 終了
 
     for site_key, site in sites.items():
         if not site.get("enabled", False):
@@ -602,7 +599,6 @@ def main():
             logging.info(f"[{site_key}] retry_ids 再試行: {len(retry_ids_snapshot)} 件")
 
         for entry_key in retry_ids_snapshot:
-            # ★ original_text は保持せず、ソース種別ごとに再取得する
             retry_item = fetch_item_for_retry(entry_key, site, site_state)
             if retry_item is None:
                 logging.warning(f"[{site_key}] retry再取得失敗: {entry_key}、次回に持ち越し")
@@ -621,12 +617,8 @@ def main():
                 is_retry=True,
             )
 
-            # retry_ids の除去は process_item 内で完結している
-            # ここではカウントのみ管理する
             if result == "success":
                 retry_posted_count += 1
-            # "failed" は retry_ids に残したまま（次回再試行）
-            # "skipped" は process_item 内で retry_ids から除去済み
 
         # =========================================================
         # ★ STEP 2: 通常記事の取得・処理
@@ -641,12 +633,9 @@ def main():
             else:
                 continue
         except RuntimeError as fetch_err:
-            # NVD 429 等、記事取得レベルの失敗
-            # ★ last_checked_at を進めない（次回同じ時間窓を再取得）
-            # ★ retry_ids の処理結果（STEP 1）は保存する
             logging.warning(f"[{site_key}] 記事取得失敗のため通常処理をスキップ: {fetch_err}")
             logging.info(f"[{site_key}] fetched=0, posted=0, retry_posted={retry_posted_count}, skipped=0, failed=0, retry_pending={len(site_state.get('retry_ids', []))}")
-            state_dirty = True  # STEP 1 の retry 処理結果を保存するため
+            state_dirty = True
             continue
 
         fetched_count = len(items)
@@ -658,7 +647,6 @@ def main():
                 cid = item.get("id")
                 entry_key = cid or item.get("url")
 
-                # 成功済み・fallback済み（retry_ids で管理中）はスキップ
                 existing_entry = site_state.get("entries", {}).get(entry_key, {})
                 if existing_entry.get("status") in ("success", "fallback"):
                     continue
@@ -686,7 +674,6 @@ def main():
         site_state["last_checked_at"] = isoformat(now)
         state_dirty = True
 
-        # サイト単位サマリログ
         logging.info(
             f"[{site_key}] fetched={fetched_count}, posted={posted_count}, "
             f"retry_posted={retry_posted_count}, skipped={cve_skip_count}, "
