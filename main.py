@@ -306,9 +306,10 @@ def get_gemini_client(api_key):
 
 # 試行するモデルの優先順位リスト。
 # gemini-2.5-flash-lite が 429 / 全試行失敗になった場合、
-# gemini-2.0-flash にフォールバックする。
+# gemini-2.5-flash にフォールバックする。
 # 各モデルは独立したレート制限枠を持つため、片方が枯渇しても続行できる。
-GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-2.0-flash"]
+# ※ gemini-2.0-flash は 2026年6月1日に廃止予定のため使用しない。
+GEMINI_MODELS = ["gemini-2.5-flash-lite", "gemini-2.5-flash"]
 
 # 429 / 503（レート制限・過負荷）発生時の指数バックオフ待機秒数。
 # attempt 2回目以降: 5秒 → 15秒 → 30秒 → 60秒 と段階的に増加させ、
@@ -393,11 +394,20 @@ def summarize(text, api_key, site_type=None):
 
             except Exception as e:
                 msg = str(e)
-                # 429（レート超過）・503（過負荷）・quota（割当超過）はリトライ対象
-                is_rate_limit = "429" in msg or "503" in msg or "quota" in msg.lower()
+                error_type = type(e).__name__
+
+                # エラー種別を分類してログに残す（原因調査用）
+                # - RATE_LIMIT: 429/503/quota → リトライで回復が見込める
+                # - OTHER: 認証エラー・不正リクエスト等 → リトライ不要
+                is_rate_limit = "429" in msg or "503" in msg or "quota" in msg.lower() or "resource_exhausted" in msg.lower()
 
                 if is_rate_limit:
-                    logging.warning(f"Gemini {model} rate limit (attempt={attempt}), wait={wait:.1f}s: {e}")
+                    # レート制限: バックオフ後に同モデルで再試行
+                    logging.warning(
+                        f"Gemini {model} RATE_LIMIT "
+                        f"(attempt={attempt}/{GEMINI_MAX_ATTEMPTS}, wait={wait:.1f}s) "
+                        f"[{error_type}] {msg[:200]}"  # メッセージが長い場合は先頭200文字のみ
+                    )
                     if attempt >= GEMINI_MAX_ATTEMPTS:
                         # このモデルの試行上限に達した → 次のモデルへ
                         logging.warning(f"Gemini {model} 全試行失敗、次モデルへフォールバック")
@@ -405,7 +415,11 @@ def summarize(text, api_key, site_type=None):
                     continue  # 同モデルで再試行
                 else:
                     # レート制限以外のエラー（認証失敗・不正なリクエスト等）は即座に次モデルへ
-                    logging.error(f"Gemini {model} error (attempt={attempt}): {e}")
+                    logging.error(
+                        f"Gemini {model} OTHER_ERROR "
+                        f"(attempt={attempt}) "
+                        f"[{error_type}] {msg[:200]}"
+                    )
                     break
 
     # 全モデル・全試行失敗 → None を返して呼び出し側でフォールバック処理させる
