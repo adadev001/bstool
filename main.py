@@ -346,6 +346,7 @@ def summarize(text, api_key, site_type=None):
 以下の観点がある場合には必ず含めてください。
 ない場合には記事内容の事実のみを日本語95文字以内で要約してください。
 また該当しない場合は文字数削減のため、該当しないことについて言及しないでよいです。
+
 - 対象の製品（アプリ）名とバージョン
 - 脆弱性の内容
 - 影響を受ける対象
@@ -371,14 +372,15 @@ def summarize(text, api_key, site_type=None):
 """
     ) + f"\n{text}"
 
-    # モデルをまたいで最大 GEMINI_MAX_ATTEMPTS 回試みる
-    attempt = 0
+    # モデルごとに最大 GEMINI_MAX_ATTEMPTS 回試みる。
+    # attempt カウンターはモデルをまたぐたびにリセットする。
+    # （以前は attempt がリセットされず、2番目のモデルへのフォールバックが機能しないバグがあった）
     for model in GEMINI_MODELS:
-        while attempt < GEMINI_MAX_ATTEMPTS:
-            attempt += 1
+        for attempt in range(1, GEMINI_MAX_ATTEMPTS + 1):
 
             # 1回目は短いランダム待機（API への急激な集中を避ける）
             # 2回目以降はバックオフテーブルに従って待機秒数を増加
+            # RPM 制限（1分15回）が原因のため、短い間隔で再試行するほうが効果的
             wait = random.uniform(1.0, 2.0) if attempt == 1 else GEMINI_BACKOFF[min(attempt - 2, len(GEMINI_BACKOFF) - 1)]
             time.sleep(wait)
 
@@ -389,7 +391,7 @@ def summarize(text, api_key, site_type=None):
                 )
                 result = safe_truncate(resp.text.strip(), SUMMARY_HARD_LIMIT)
 
-                # リトライが発生していた場合はログに残す
+                # リトライまたはフォールバックが発生していた場合はログに残す
                 if attempt > 1 or model != GEMINI_MODELS[0]:
                     logging.info(f"Gemini summarize success (model={model}, attempt={attempt})")
                 return result
@@ -399,22 +401,21 @@ def summarize(text, api_key, site_type=None):
                 error_type = type(e).__name__
 
                 # エラー種別を分類してログに残す（原因調査用）
-                # - RATE_LIMIT: 429/503/quota → リトライで回復が見込める
+                # - RATE_LIMIT: 429/503/quota/resource_exhausted → リトライで回復が見込める
                 # - OTHER: 認証エラー・不正リクエスト等 → リトライ不要
                 is_rate_limit = "429" in msg or "503" in msg or "quota" in msg.lower() or "resource_exhausted" in msg.lower()
 
                 if is_rate_limit:
-                    # レート制限: バックオフ後に同モデルで再試行
                     logging.warning(
                         f"Gemini {model} RATE_LIMIT "
                         f"(attempt={attempt}/{GEMINI_MAX_ATTEMPTS}, wait={wait:.1f}s) "
-                        f"[{error_type}] {msg[:200]}"  # メッセージが長い場合は先頭200文字のみ
+                        f"[{error_type}] {msg[:200]}"
                     )
                     if attempt >= GEMINI_MAX_ATTEMPTS:
-                        # このモデルの試行上限に達した → 次のモデルへ
-                        logging.warning(f"Gemini {model} 全試行失敗、次モデルへフォールバック")
-                        break
-                    continue  # 同モデルで再試行
+                        # このモデルの試行上限に達した → for ループを抜けて次モデルへ
+                        next_model = GEMINI_MODELS[GEMINI_MODELS.index(model) + 1] if model != GEMINI_MODELS[-1] else "なし"
+                        logging.warning(f"Gemini {model} 全試行失敗、次モデル({next_model})へフォールバック")
+                    # attempt ループを継続（次の attempt へ進む、上限なら自動的に次モデルへ）
                 else:
                     # レート制限以外のエラー（認証失敗・不正なリクエスト等）は即座に次モデルへ
                     logging.error(
@@ -422,7 +423,7 @@ def summarize(text, api_key, site_type=None):
                         f"(attempt={attempt}) "
                         f"[{error_type}] {msg[:200]}"
                     )
-                    break
+                    break  # このモデルの残り試行をスキップして次モデルへ
 
     # 全モデル・全試行失敗 → None を返して呼び出し側でフォールバック処理させる
     logging.error("Gemini summarize: 全モデル・全試行失敗")
